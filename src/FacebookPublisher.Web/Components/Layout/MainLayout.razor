@@ -1,0 +1,27 @@
+﻿@inherits LayoutComponentBase
+@inject Microsoft.Extensions.Options.IOptions<HostingOptions> Hosting
+
+<div class="app-shell">
+    <aside class="app-sidebar">
+        <NavMenu />
+    </aside>
+
+    <main class="app-main">
+        @if (!Hosting.Value.AutomationEnabled)
+        {
+            <div class="demo-banner">
+                <i class="bi bi-info-circle"></i>
+                <span><strong>Online demo.</strong> Every screen works, but publishing to Facebook is disabled here — campaigns stop at the session check. Run the app on your own PC to post.</span>
+            </div>
+        }
+        <div class="app-content">
+            @Body
+        </div>
+    </main>
+</div>
+
+<div id="blazor-error-ui" data-nosnippet>
+    An unhandled error has occurred.
+    <a href="." class="reload">Reload</a>
+    <span class="dismiss">🗙</span>
+</div>

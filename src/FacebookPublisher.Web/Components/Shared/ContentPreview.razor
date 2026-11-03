@@ -1,0 +1,42 @@
+@* Renders saved content the way it will roughly appear as a group post. *@
+<div class="post-preview">
+    <div class="post-head">
+        <div class="avatar"></div>
+        <div>
+            <div class="fw-semibold">Your account</div>
+            <div class="form-text mt-0">Group post preview</div>
+        </div>
+    </div>
+    @if (!string.IsNullOrWhiteSpace(Content.Text))
+    {
+        <div class="post-text">@Content.Text</div>
+    }
+    @if (Content.Attachments.Count > 0)
+    {
+        <div class="media-grid">
+            @foreach (var a in Content.Attachments)
+            {
+                @switch (a.Type)
+                {
+                    case AttachmentType.Image:
+                        <img src="media/@a.Id" alt="@a.FileName" loading="lazy" />
+                        break;
+                    case AttachmentType.Video:
+                        <video src="media/@a.Id" controls preload="metadata"></video>
+                        break;
+                    default:
+                        <a class="media-tile text-decoration-none" href="media/@a.Id" target="_blank">
+                            <i class="bi bi-file-earmark-pdf text-danger"></i>
+                            <span>@a.FileName</span>
+                            <span>@a.SizeBytes.ToFileSize()</span>
+                        </a>
+                        break;
+                }
+            }
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public ContentDetailDto Content { get; set; } = default!;
+}

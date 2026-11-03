@@ -1,0 +1,315 @@
+@page "/content"
+@inherits AppComponentBase
+@inject ContentService ContentService
+@inject IJSRuntime JS
+
+<PageTitle>Content Composer · Group Publisher</PageTitle>
+
+<div class="page-header">
+    <div>
+        <h1>Content Composer</h1>
+        <p>Write a message, attach images, videos or a PDF, and preview the post before publishing.</p>
+    </div>
+</div>
+
+<AlertBox Errors="Errors" Success="@Success" />
+
+<div class="row g-3">
+    <div class="col-xl-7">
+        <div class="card-panel">
+            <h2><i class="bi bi-pencil"></i> New content</h2>
+
+            <div class="mb-3">
+                <label class="form-label">Title <span class="text-muted">(internal name, not posted)</span></label>
+                <input class="form-control" @bind="_title" @bind:event="oninput" maxlength="200" placeholder="e.g. November workshop announcement" />
+            </div>
+
+            <div class="mb-3">
+                <label class="form-label d-flex justify-content-between">
+                    <span>Message</span>
+                    <span class="text-muted fw-normal @(_text.Length > Opts.MaxTextLength ? "text-danger" : "")">@_text.Length.ToString("N0") / @Opts.MaxTextLength.ToString("N0")</span>
+                </label>
+                <textarea class="form-control" rows="8" @bind="_text" @bind:event="oninput" placeholder="Write the text of your post…"></textarea>
+            </div>
+
+            <label class="form-label">Attachments</label>
+            <div class="drop-zone mb-2">
+                <InputFile @key="_inputKey" OnChange="OnFilesSelectedAsync" multiple accept="@ContentUploadOptions.AcceptAttribute" />
+                <i class="bi bi-cloud-arrow-up fs-3 text-primary"></i>
+                <div class="fw-semibold">Click or drop files here</div>
+                <div class="form-text">
+                    Images up to @Opts.MaxImageBytes.ToFileSize() · Videos up to @Opts.MaxVideoBytes.ToFileSize() · PDF up to @Opts.MaxPdfBytes.ToFileSize()
+                    · max @Opts.MaxAttachments files. A PDF must be the only attachment. Selecting again replaces the current files.
+                </div>
+            </div>
+
+            @foreach (var f in _files)
+            {
+                <div class="file-chip @(f.Error is null ? "" : "invalid-file")">
+                    <i class="bi @Icon(f.Type) fs-5"></i>
+                    <span class="file-name" title="@f.File.Name">@f.File.Name</span>
+                    <span class="text-muted small">@f.File.Size.ToFileSize()</span>
+                    <button class="btn btn-sm btn-link text-danger p-0 btn-icon" title="Remove" @onclick="() => RemoveFile(f)"><i class="bi bi-x-lg"></i></button>
+                </div>
+                @if (f.Error is not null)
+                {
+                    <div class="validation-message mb-2">@f.Error</div>
+                }
+            }
+
+            @if (ValidationErrors.Count > 0 && (_title.Length > 0 || _text.Length > 0 || _files.Count > 0))
+            {
+                <ul class="validation-message ps-3 mt-2">
+                    @foreach (var e in ValidationErrors)
+                    {
+                        <li>@e</li>
+                    }
+                </ul>
+            }
+
+            <div class="d-flex gap-2 mt-3">
+                <button class="btn btn-primary" disabled="@(Busy || ValidationErrors.Count > 0)" @onclick="SaveAsync">
+                    @if (Busy)
+                    {
+                        <span><i class="bi bi-arrow-repeat spin"></i> Uploading…</span>
+                    }
+                    else
+                    {
+                        <span><i class="bi bi-save"></i> Save content</span>
+                    }
+                </button>
+                <button class="btn btn-light" disabled="@Busy" @onclick="Reset">Clear</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-xl-5">
+        <div class="card-panel">
+            <h2><i class="bi bi-eye"></i> Live preview</h2>
+            <div class="post-preview">
+                <div class="post-head">
+                    <div class="avatar"></div>
+                    <div>
+                        <div class="fw-semibold">Your account</div>
+                        <div class="form-text mt-0">Group post preview</div>
+                    </div>
+                </div>
+                @if (!string.IsNullOrWhiteSpace(_text))
+                {
+                    <div class="post-text">@_text</div>
+                }
+                else if (_files.Count == 0)
+                {
+                    <div class="post-text text-muted">Your message will appear here.</div>
+                }
+                @if (_files.Count > 0)
+                {
+                    <div class="media-grid">
+                        @foreach (var f in _files)
+                        {
+                            @if (f.Thumbnail is not null)
+                            {
+                                <img src="@f.Thumbnail" alt="@f.File.Name" />
+                            }
+                            else
+                            {
+                                <div class="media-tile">
+                                    <i class="bi @Icon(f.Type)"></i>
+                                    <span>@f.File.Name</span>
+                                </div>
+                            }
+                        }
+                    </div>
+                }
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card-panel">
+    <h2><i class="bi bi-collection"></i> Content library (@_library.Count)</h2>
+    @if (_library.Count == 0)
+    {
+        <div class="empty-state"><i class="bi bi-collection"></i>No saved content yet.</div>
+    }
+    else
+    {
+        <div class="row g-3">
+            @foreach (var c in _library)
+            {
+                <div class="col-md-6 col-xxl-4">
+                    <div class="content-card">
+                        <div class="d-flex justify-content-between align-items-start mb-1">
+                            <div class="fw-semibold">@c.Title</div>
+                            <span class="form-text mt-0 text-nowrap">@Fmt.Relative(c.CreatedAtUtc)</span>
+                        </div>
+                        <div class="content-text mb-2">@(c.TextPreview ?? "(no text)")</div>
+                        <div class="d-flex flex-wrap gap-2 small text-muted mb-3">
+                            @if (c.ImageCount > 0) { <span><i class="bi bi-image"></i> @c.ImageCount</span> }
+                            @if (c.VideoCount > 0) { <span><i class="bi bi-camera-video"></i> @c.VideoCount</span> }
+                            @if (c.PdfCount > 0) { <span><i class="bi bi-file-earmark-pdf"></i> @c.PdfCount</span> }
+                            <span><i class="bi bi-megaphone"></i> used in @c.CampaignCount campaign(s)</span>
+                        </div>
+                        <div class="d-flex gap-2">
+                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => PreviewAsync(c.Id)"><i class="bi bi-eye"></i> Preview</button>
+                            <a class="btn btn-sm btn-outline-primary" href="campaigns/new?contentId=@c.Id"><i class="bi bi-send"></i> Publish</a>
+                            <button class="btn btn-sm btn-outline-danger ms-auto btn-icon" title="Delete" disabled="@(Busy || c.CampaignCount > 0)" @onclick="() => DeleteAsync(c)"><i class="bi bi-trash"></i></button>
+                        </div>
+                    </div>
+                </div>
+            }
+        </div>
+    }
+</div>
+
+@if (_preview is not null)
+{
+    <div class="modal-backdrop-app" @onclick="() => _preview = null">
+        <div class="modal-panel wide" @onclick:stopPropagation="true">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h5 class="m-0">@_preview.Title</h5>
+                <button class="btn btn-light btn-sm btn-icon" @onclick="() => _preview = null"><i class="bi bi-x-lg"></i></button>
+            </div>
+            <ContentPreview Content="_preview" />
+        </div>
+    </div>
+}
+
+@code {
+    private string _title = string.Empty;
+    private string _text = string.Empty;
+    private readonly List<SelectedFile> _files = [];
+    private List<ContentSummaryDto> _library = [];
+    private ContentDetailDto? _preview;
+    private int _inputKey;
+
+    private ContentUploadOptions Opts => ContentService.Options;
+
+    private IReadOnlyList<string> ValidationErrors
+    {
+        get
+        {
+            var errors = FileValidator.ValidatePost(_text, _files.Select(f => (f.File.Name, f.File.Size)).ToList(), Opts).ToList();
+            if (string.IsNullOrWhiteSpace(_title))
+            {
+                errors.Insert(0, "Enter a title.");
+            }
+            return errors;
+        }
+    }
+
+    protected override async Task OnInitializedAsync() => await LoadLibraryAsync();
+
+    private async Task LoadLibraryAsync() => _library = (await ContentService.ListAsync()).ToList();
+
+    private async Task OnFilesSelectedAsync(InputFileChangeEventArgs e)
+    {
+        _files.Clear();
+        ClearMessages();
+        if (e.FileCount > Opts.MaxAttachments)
+        {
+            ShowError($"You selected {e.FileCount} files; the maximum is {Opts.MaxAttachments}.");
+            return;
+        }
+
+        foreach (var file in e.GetMultipleFiles(Opts.MaxAttachments))
+        {
+            var selected = new SelectedFile(file);
+            if (FileValidator.TryClassify(file.Name, Opts, out var classification, out var error))
+            {
+                selected.Type = classification!.Type;
+                selected.MaxBytes = classification.MaxBytes;
+                if (file.Size > classification.MaxBytes)
+                {
+                    selected.Error = $"Too large: the limit for {classification.Type} files is {classification.MaxBytes.ToFileSize()}.";
+                }
+                else if (classification.Type == AttachmentType.Image)
+                {
+                    selected.Thumbnail = await CreateThumbnailAsync(file);
+                }
+            }
+            else
+            {
+                selected.Error = error;
+            }
+            _files.Add(selected);
+        }
+    }
+
+    private static async Task<string?> CreateThumbnailAsync(IBrowserFile file)
+    {
+        try
+        {
+            var resized = await file.RequestImageFileAsync("image/jpeg", 480, 480);
+            await using var stream = resized.OpenReadStream(5 * 1024 * 1024);
+            using var buffer = new MemoryStream();
+            await stream.CopyToAsync(buffer);
+            return $"data:image/jpeg;base64,{Convert.ToBase64String(buffer.ToArray())}";
+        }
+        catch
+        {
+            // Thumbnails are a convenience; unsupported formats simply show an icon.
+            return null;
+        }
+    }
+
+    private void RemoveFile(SelectedFile file) => _files.Remove(file);
+
+    private async Task SaveAsync()
+    {
+        var files = _files
+            .Select(f => new UploadFile(f.File.Name, f.File.Size, () => f.File.OpenReadStream(f.MaxBytes)))
+            .ToList();
+
+        await RunAsync(async () =>
+        {
+            await ContentService.CreateAsync(new CreateContentRequest(_title, _text, files));
+            await LoadLibraryAsync();
+            Reset();
+        }, "Content saved. You can now preview it or start a campaign with it.");
+    }
+
+    private void Reset()
+    {
+        _title = string.Empty;
+        _text = string.Empty;
+        _files.Clear();
+        _inputKey++;
+    }
+
+    private async Task PreviewAsync(Guid id) => await RunAsync(async () => _preview = await ContentService.GetAsync(id));
+
+    private async Task DeleteAsync(ContentSummaryDto content)
+    {
+        if (!await JS.InvokeAsync<bool>("confirm", $"Delete \"{content.Title}\" and its files?"))
+        {
+            return;
+        }
+        await RunAsync(async () =>
+        {
+            await ContentService.DeleteAsync(content.Id);
+            await LoadLibraryAsync();
+        }, "Content deleted.");
+    }
+
+    private static string Icon(AttachmentType? type) => type switch
+    {
+        AttachmentType.Image => "bi-image text-primary",
+        AttachmentType.Video => "bi-camera-video text-info",
+        AttachmentType.Pdf => "bi-file-earmark-pdf text-danger",
+        _ => "bi-file-earmark text-muted"
+    };
+
+    private sealed class SelectedFile(IBrowserFile file)
+    {
+        public IBrowserFile File { get; } = file;
+
+        public AttachmentType? Type { get; set; }
+
+        public long MaxBytes { get; set; }
+
+        public string? Error { get; set; }
+
+        public string? Thumbnail { get; set; }
+    }
+}

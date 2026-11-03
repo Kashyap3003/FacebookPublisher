@@ -1,0 +1,265 @@
+@page "/campaigns/new"
+@inherits AppComponentBase
+@inject ContentService ContentService
+@inject GroupService GroupService
+@inject CampaignService CampaignService
+@inject SettingsService SettingsService
+@inject NavigationManager Nav
+@inject FacebookPublisher.Application.Abstractions.ICampaignExecutionTracker Tracker
+
+<PageTitle>Publishing Campaign · Group Publisher</PageTitle>
+
+<div class="page-header">
+    <div>
+        <h1>Publishing Campaign</h1>
+        <p>Choose content and groups, review the settings, then start. Membership is verified for every group before posting.</p>
+    </div>
+</div>
+
+<AlertBox Errors="Errors" Success="@Success" />
+
+@if (_settings is null)
+{
+    <div class="empty-state"><i class="bi bi-hourglass-split"></i>Loading…</div>
+}
+else
+{
+    @if (Tracker.ActiveCampaignId is not null)
+    {
+        <div class="info-banner"><i class="bi bi-info-circle me-1"></i> Another campaign is running. A new campaign will be queued and start when it finishes.</div>
+    }
+
+    <div class="row g-3">
+        <div class="col-xl-7">
+            <div class="card-panel">
+                <h2><span class="badge text-bg-primary rounded-pill">1</span> Content</h2>
+                @if (_contents.Count == 0)
+                {
+                    <div class="empty-state py-3"><i class="bi bi-collection"></i>No content yet. <a href="content">Create content first.</a></div>
+                }
+                else
+                {
+                    <select class="form-select" value="@_contentId" @onchange="OnContentChangedAsync">
+                        <option value="">— Select content —</option>
+                        @foreach (var c in _contents)
+                        {
+                            <option value="@c.Id">@c.Title (@Fmt.Time(c.CreatedAtUtc))</option>
+                        }
+                    </select>
+                }
+            </div>
+
+            <div class="card-panel">
+                <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                    <h2 class="m-0"><span class="badge text-bg-primary rounded-pill">2</span> Groups <span class="text-muted fw-normal">(@_selected.Count selected, max @_settings.MaxGroupsPerCampaign)</span></h2>
+                    <div class="d-flex gap-2">
+                        <input class="form-control form-control-sm" style="max-width:200px" placeholder="Filter…" @bind="_filter" @bind:event="oninput" />
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="SelectAllVisible">Select all</button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => _selected.Clear()">None</button>
+                    </div>
+                </div>
+                @if (_groups.Count == 0)
+                {
+                    <div class="empty-state py-3"><i class="bi bi-people"></i>No active groups. <a href="groups">Add groups first.</a></div>
+                }
+                else
+                {
+                    <div class="table-wrap" style="max-height:420px; overflow-y:auto">
+                        <table class="table table-app table-hover">
+                            <thead><tr><th style="width:2rem"></th><th>Group</th><th>Last known membership</th></tr></thead>
+                            <tbody>
+                                @foreach (var g in VisibleGroups)
+                                {
+                                    <tr @onclick="() => Toggle(g.Id)" style="cursor:pointer">
+                                        <td><input type="checkbox" class="form-check-input" checked="@_selected.Contains(g.Id)" @onclick:stopPropagation="true" @onchange="() => Toggle(g.Id)" /></td>
+                                        <td>
+                                            <div class="fw-semibold">@g.Name</div>
+                                            <div class="url-cell text-muted">@g.Url</div>
+                                        </td>
+                                        <td><StatusBadge Value="g.LastMembershipStatus" /></td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                    @if (SelectedNonMembers > 0)
+                    {
+                        <div class="form-text text-warning"><i class="bi bi-exclamation-triangle"></i> @SelectedNonMembers selected group(s) were last seen as "Not a Member" or "Inaccessible"; they will be re-checked and skipped if still not accessible.</div>
+                    }
+                }
+            </div>
+        </div>
+
+        <div class="col-xl-5">
+            <div class="card-panel">
+                <h2><span class="badge text-bg-primary rounded-pill">3</span> Settings</h2>
+                <div class="mb-3">
+                    <label class="form-label">Campaign name</label>
+                    <input class="form-control" @bind="_name" maxlength="200" />
+                </div>
+                <div class="row g-2 mb-1">
+                    <div class="col">
+                        <label class="form-label">Min delay (s)</label>
+                        <input type="number" class="form-control" min="@CampaignService.MinimumDelaySeconds" max="3600" @bind="_minDelay" />
+                    </div>
+                    <div class="col">
+                        <label class="form-label">Max delay (s)</label>
+                        <input type="number" class="form-control" min="@CampaignService.MinimumDelaySeconds" max="3600" @bind="_maxDelay" />
+                    </div>
+                </div>
+                <div class="form-text mb-3">Wait between consecutive groups. A random value within this range is used each time.</div>
+                <div class="form-check form-switch mb-1">
+                    <input class="form-check-input" type="checkbox" id="approval" @bind="_requireApproval" />
+                    <label class="form-check-label" for="approval">Pause for my approval before each post (optional)</label>
+                </div>
+                <div class="form-text mb-3">
+                    @if (_requireApproval)
+                    {
+                        <span>Each post is prepared in the browser window and waits for your Approve/Reject in the Execution Monitor (timeout @_settings.ApprovalTimeoutMinutes min).</span>
+                    }
+                    else
+                    {
+                        <span>Fully automatic: posts are published without waiting for you. Every step is shown live in the Execution Monitor.</span>
+                    }
+                </div>
+
+                <dl class="kv mb-3">
+                    <dt>Groups</dt><dd>@_selected.Count</dd>
+                    <dt>Estimated duration</dt><dd>@EstimatedDuration</dd>
+                    <dt>Duplicate protection</dt><dd>@(_settings.DuplicateWindowHours > 0 ? $"skip groups that received this content in the last {_settings.DuplicateWindowHours} h" : "off")</dd>
+                </dl>
+
+                <button class="btn btn-primary w-100" disabled="@(Busy || _contentId is null || _selected.Count == 0)" @onclick="StartAsync">
+                    @if (Busy)
+                    {
+                        <span><i class="bi bi-arrow-repeat spin"></i> Starting…</span>
+                    }
+                    else
+                    {
+                        <span><i class="bi bi-play-fill"></i> Start campaign</span>
+                    }
+                </button>
+            </div>
+
+            <div class="card-panel">
+                <h2><i class="bi bi-eye"></i> Content preview</h2>
+                @if (_content is null)
+                {
+                    <div class="empty-state py-3">Select content to preview it.</div>
+                }
+                else
+                {
+                    <ContentPreview Content="_content" />
+                }
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [SupplyParameterFromQuery(Name = "contentId")]
+    public Guid? InitialContentId { get; set; }
+
+    private FacebookPublisher.Domain.Entities.PublisherSettings? _settings;
+    private List<ContentSummaryDto> _contents = [];
+    private List<GroupDto> _groups = [];
+    private readonly HashSet<Guid> _selected = [];
+    private Guid? _contentId;
+    private ContentDetailDto? _content;
+    private string _filter = string.Empty;
+    private string _name = $"Campaign {DateTime.Now:dd MMM yyyy HH:mm}";
+    private int _minDelay;
+    private int _maxDelay;
+    private bool _requireApproval;
+
+    private IEnumerable<GroupDto> VisibleGroups => string.IsNullOrWhiteSpace(_filter)
+        ? _groups
+        : _groups.Where(g => g.Name.Contains(_filter, StringComparison.OrdinalIgnoreCase) || g.Url.Contains(_filter, StringComparison.OrdinalIgnoreCase));
+
+    private int SelectedNonMembers => _groups.Count(g => _selected.Contains(g.Id)
+        && g.LastMembershipStatus is MembershipStatus.NotMember or MembershipStatus.Inaccessible);
+
+    private string EstimatedDuration
+    {
+        get
+        {
+            if (_selected.Count == 0)
+            {
+                return "—";
+            }
+            // Rough: ~30s of page work per group plus the average delay between groups.
+            var seconds = _selected.Count * 30 + (_selected.Count - 1) * (_minDelay + _maxDelay) / 2;
+            var span = TimeSpan.FromSeconds(seconds);
+            return span.TotalMinutes < 1 ? "under a minute" : $"~{Math.Ceiling(span.TotalMinutes)} min" + (_requireApproval ? " + review time" : "");
+        }
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await RunAsync(async () =>
+        {
+            _settings = await SettingsService.GetEntityAsync();
+            _minDelay = _settings.DefaultMinDelaySeconds;
+            _maxDelay = _settings.DefaultMaxDelaySeconds;
+            _requireApproval = _settings.RequireApprovalByDefault;
+            _contents = (await ContentService.ListAsync()).ToList();
+            _groups = (await GroupService.ListAsync(activeOnly: true)).ToList();
+
+            if (InitialContentId is { } id && _contents.Any(c => c.Id == id))
+            {
+                await SelectContentAsync(id);
+            }
+        });
+    }
+
+    private async Task OnContentChangedAsync(ChangeEventArgs e)
+    {
+        if (Guid.TryParse(e.Value?.ToString(), out var id))
+        {
+            await RunAsync(() => SelectContentAsync(id));
+        }
+        else
+        {
+            _contentId = null;
+            _content = null;
+        }
+    }
+
+    private async Task SelectContentAsync(Guid id)
+    {
+        _contentId = id;
+        _content = await ContentService.GetAsync(id);
+    }
+
+    private void Toggle(Guid id)
+    {
+        if (!_selected.Remove(id))
+        {
+            _selected.Add(id);
+        }
+    }
+
+    private void SelectAllVisible()
+    {
+        foreach (var g in VisibleGroups)
+        {
+            if (_selected.Count >= _settings!.MaxGroupsPerCampaign)
+            {
+                break;
+            }
+            _selected.Add(g.Id);
+        }
+    }
+
+    private async Task StartAsync()
+    {
+        Guid campaignId = default;
+        // Keep the original group order from the table.
+        var orderedIds = _groups.Where(g => _selected.Contains(g.Id)).Select(g => g.Id).ToList();
+        if (await RunAsync(async () => campaignId = await CampaignService.CreateAndStartAsync(
+                new CreateCampaignRequest(_name, _contentId!.Value, orderedIds, _minDelay, _maxDelay, _requireApproval))))
+        {
+            Nav.NavigateTo($"monitor/{campaignId}");
+        }
+    }
+}

@@ -1,0 +1,329 @@
+@page "/groups"
+@inherits AppComponentBase
+@inject GroupService GroupService
+@inject IJSRuntime JS
+@inject FacebookPublisher.Application.Abstractions.ICampaignExecutionTracker Tracker
+
+<PageTitle>Facebook Groups · Group Publisher</PageTitle>
+
+<div class="page-header">
+    <div>
+        <h1>Facebook Groups</h1>
+        <p>Manage the groups content can be distributed to. Only groups the account has already joined will receive posts.</p>
+    </div>
+</div>
+
+<AlertBox Errors="Errors" Success="@Success" />
+
+<div class="row g-3">
+    <div class="col-xl-5">
+        <div class="card-panel">
+            <h2><i class="bi bi-plus-circle"></i> Add a group</h2>
+            <EditForm Model="_newGroup" OnValidSubmit="AddAsync" FormName="add-group">
+                <DataAnnotationsValidator />
+                <div class="mb-2">
+                    <label class="form-label">Group URL</label>
+                    <InputText class="form-control" @bind-Value="_newGroup.Url" placeholder="https://www.facebook.com/groups/123456789 or a share link" />
+                    <ValidationMessage For="() => _newGroup.Url" />
+                    <div class="form-text">Group addresses and share links (<code>facebook.com/share/g/…</code>) are both accepted.</div>
+                </div>
+                <div class="mb-2">
+                    <label class="form-label">Display name <span class="text-muted">(optional, detected automatically)</span></label>
+                    <InputText class="form-control" @bind-Value="_newGroup.Name" />
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Notes</label>
+                    <InputText class="form-control" @bind-Value="_newGroup.Notes" />
+                </div>
+                <button class="btn btn-primary" type="submit" disabled="@Busy"><i class="bi bi-plus-lg"></i> Add group</button>
+            </EditForm>
+        </div>
+
+        <div class="card-panel">
+            <h2><i class="bi bi-list-ul"></i> Add multiple groups</h2>
+            <p class="form-text mt-0">
+                One group per line. Use <code>URL</code> or <code>Name | URL</code>. Invalid and duplicate links are reported and skipped.
+                Share links (<code>facebook.com/share/g/…</code>) are opened in the logged-in browser to find the group's address and name —
+                <a href="settings">log in under Settings</a> first.
+            </p>
+            <textarea class="form-control mb-2" rows="6" @bind="_bulkText" @bind:event="oninput" placeholder="https://www.facebook.com/groups/example1&#10;https://www.facebook.com/share/g/1AbCdEfGh/&#10;Local Makers | https://www.facebook.com/groups/localmakers"></textarea>
+            <button class="btn btn-outline-primary" @onclick="AddBulkAsync" disabled="@(Busy || string.IsNullOrWhiteSpace(_bulkText))">
+                @if (Busy && _bulkRunning)
+                {
+                    <span><i class="bi bi-arrow-repeat spin"></i> @(BulkHasShareLinks ? "Resolving share links in the browser…" : "Adding…")</span>
+                }
+                else
+                {
+                    <span><i class="bi bi-check2-all"></i> Validate &amp; add all</span>
+                }
+            </button>
+            @if (BulkHasShareLinks && !Busy)
+            {
+                <div class="form-text">@BulkShareLinkCount share link(s) will be opened in the browser, a few seconds each.</div>
+            }
+
+            @if (_bulkResult is not null)
+            {
+                <div class="mt-3 small">
+                    <div class="text-success"><i class="bi bi-check-circle"></i> @_bulkResult.Added added</div>
+                    @if (_bulkResult.Resolved.Count > 0)
+                    {
+                        <div class="text-primary mt-1"><i class="bi bi-link-45deg"></i> @_bulkResult.Resolved.Count share link(s) resolved:</div>
+                        <ul class="mb-0">
+                            @foreach (var line in _bulkResult.Resolved)
+                            {
+                                <li class="text-break">@line</li>
+                            }
+                        </ul>
+                    }
+                    @if (_bulkResult.Duplicates.Count > 0)
+                    {
+                        <div class="text-warning"><i class="bi bi-files"></i> @_bulkResult.Duplicates.Count already in the list</div>
+                    }
+                    @if (_bulkResult.Invalid.Count > 0)
+                    {
+                        <div class="text-danger mt-1"><i class="bi bi-x-circle"></i> @_bulkResult.Invalid.Count invalid:</div>
+                        <ul class="text-danger mb-0">
+                            @foreach (var line in _bulkResult.Invalid)
+                            {
+                                <li>@line</li>
+                            }
+                        </ul>
+                    }
+                </div>
+            }
+        </div>
+    </div>
+
+    <div class="col-xl-7">
+        <div class="card-panel">
+            <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between mb-3">
+                <div class="panel-title m-0 fw-semibold"><i class="bi bi-people"></i> Configured groups (@_groups.Count)</div>
+                <input class="form-control form-control-sm" style="max-width:260px" placeholder="Search name or URL…" @bind="_search" @bind:event="oninput" />
+            </div>
+
+            @if (_groups.Count == 0)
+            {
+                <div class="empty-state"><i class="bi bi-people"></i>No groups yet. Add your first group on the left.</div>
+            }
+            else
+            {
+                <div class="table-wrap">
+                    <table class="table table-app table-hover">
+                        <thead>
+                            <tr>
+                                <th>Group</th>
+                                <th>Membership</th>
+                                <th>Active</th>
+                                <th class="text-end">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var g in Filtered)
+                            {
+                                <tr class="@(g.IsActive ? "" : "opacity-50")">
+                                    <td>
+                                        <div class="fw-semibold">@g.Name</div>
+                                        <div class="url-cell"><a href="@g.Url" target="_blank" rel="noopener">@g.Url</a></div>
+                                        @if (!string.IsNullOrEmpty(g.Notes))
+                                        {
+                                            <div class="msg-cell">@g.Notes</div>
+                                        }
+                                    </td>
+                                    <td>
+                                        <StatusBadge Value="g.LastMembershipStatus" />
+                                        <div class="form-text mt-1" title="@Fmt.Time(g.LastCheckedAtUtc)">checked @Fmt.Relative(g.LastCheckedAtUtc)</div>
+                                    </td>
+                                    <td>
+                                        <div class="form-check form-switch m-0">
+                                            <input class="form-check-input" type="checkbox" checked="@g.IsActive" @onchange="e => ToggleActiveAsync(g, (bool)e.Value!)" />
+                                        </div>
+                                    </td>
+                                    <td class="text-end text-nowrap">
+                                        <button class="btn btn-sm btn-outline-secondary btn-icon" title="Check access in the browser (never joins)"
+                                                disabled="@(Busy || Tracker.ActiveCampaignId is not null)" @onclick="() => VerifyAsync(g)">
+                                            @if (_verifyingId == g.Id)
+                                            {
+                                                <i class="bi bi-arrow-repeat spin"></i>
+                                            }
+                                            else
+                                            {
+                                                <i class="bi bi-shield-check"></i>
+                                            }
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-secondary btn-icon" title="Edit" @onclick="() => StartEdit(g)"><i class="bi bi-pencil"></i></button>
+                                        <button class="btn btn-sm btn-outline-danger btn-icon" title="Delete" disabled="@Busy" @onclick="() => DeleteAsync(g)"><i class="bi bi-trash"></i></button>
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </div>
+    </div>
+</div>
+
+@if (_edit is not null)
+{
+    <div class="modal-backdrop-app" @onclick="CancelEdit">
+        <div class="modal-panel" @onclick:stopPropagation="true">
+            <h5 class="mb-3">Edit group</h5>
+            <EditForm Model="_edit" OnValidSubmit="SaveEditAsync" FormName="edit-group">
+                <DataAnnotationsValidator />
+                <div class="mb-2">
+                    <label class="form-label">Group URL</label>
+                    <InputText class="form-control" @bind-Value="_edit.Url" />
+                    <ValidationMessage For="() => _edit.Url" />
+                </div>
+                <div class="mb-2">
+                    <label class="form-label">Display name</label>
+                    <InputText class="form-control" @bind-Value="_edit.Name" />
+                </div>
+                <div class="mb-2">
+                    <label class="form-label">Notes</label>
+                    <InputText class="form-control" @bind-Value="_edit.Notes" />
+                </div>
+                <div class="form-check form-switch mb-3">
+                    <InputCheckbox class="form-check-input" id="edit-active" @bind-Value="_edit.IsActive" />
+                    <label class="form-check-label" for="edit-active">Active (available for campaigns)</label>
+                </div>
+                <div class="d-flex gap-2 justify-content-end">
+                    <button type="button" class="btn btn-light" @onclick="CancelEdit">Cancel</button>
+                    <button type="submit" class="btn btn-primary" disabled="@Busy">Save changes</button>
+                </div>
+            </EditForm>
+        </div>
+    </div>
+}
+
+@code {
+    private List<GroupDto> _groups = [];
+    private GroupForm _newGroup = new();
+    private GroupForm? _edit;
+    private Guid? _editId;
+    private string _bulkText = string.Empty;
+    private BulkAddResult? _bulkResult;
+    private bool _bulkRunning;
+    private string _search = string.Empty;
+    private Guid? _verifyingId;
+
+    private int BulkShareLinkCount => _bulkText
+        .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Count(line => GroupService.IsShareLink(line.Contains('|') ? line[(line.IndexOf('|') + 1)..] : line));
+
+    private bool BulkHasShareLinks => BulkShareLinkCount > 0;
+
+    private IEnumerable<GroupDto> Filtered => string.IsNullOrWhiteSpace(_search)
+        ? _groups
+        : _groups.Where(g => g.Name.Contains(_search, StringComparison.OrdinalIgnoreCase) || g.Url.Contains(_search, StringComparison.OrdinalIgnoreCase));
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync() => _groups = (await GroupService.ListAsync()).ToList();
+
+    private async Task AddAsync()
+    {
+        if (await RunAsync(async () =>
+            {
+                var added = await GroupService.AddAsync(new SaveGroupRequest(_newGroup.Name, _newGroup.Url, _newGroup.Notes));
+                await LoadAsync();
+                Success = $"Added {added.Url}.";
+            }))
+        {
+            _newGroup = new GroupForm();
+            Success ??= "Group added.";
+        }
+    }
+
+    private async Task AddBulkAsync()
+    {
+        _bulkResult = null;
+        _bulkRunning = true;
+        await RunAsync(async () =>
+        {
+            _bulkResult = await GroupService.AddBulkAsync(_bulkText);
+            await LoadAsync();
+            if (_bulkResult.Invalid.Count == 0)
+            {
+                _bulkText = string.Empty;
+            }
+        });
+        _bulkRunning = false;
+    }
+
+    private async Task ToggleActiveAsync(GroupDto group, bool isActive)
+    {
+        await RunAsync(async () =>
+        {
+            await GroupService.SetActiveAsync(group.Id, isActive);
+            await LoadAsync();
+        });
+    }
+
+    private async Task VerifyAsync(GroupDto group)
+    {
+        _verifyingId = group.Id;
+        await RunAsync(async () =>
+        {
+            var result = await GroupService.VerifyAccessAsync(group.Id);
+            await LoadAsync();
+            Success = $"{result.GroupName ?? group.Name}: {result.Status.ToDisplay()}{(result.Detail is null ? "" : " — " + result.Detail)}";
+        });
+        _verifyingId = null;
+    }
+
+    private void StartEdit(GroupDto group)
+    {
+        ClearMessages();
+        _editId = group.Id;
+        _edit = new GroupForm { Name = group.Name, Url = group.Url, Notes = group.Notes, IsActive = group.IsActive };
+    }
+
+    private void CancelEdit()
+    {
+        _edit = null;
+        _editId = null;
+    }
+
+    private async Task SaveEditAsync()
+    {
+        if (_edit is null || _editId is null)
+        {
+            return;
+        }
+        if (await RunAsync(async () =>
+            {
+                await GroupService.UpdateAsync(_editId.Value, new SaveGroupRequest(_edit.Name, _edit.Url, _edit.Notes, _edit.IsActive));
+                await LoadAsync();
+            }, "Group updated."))
+        {
+            CancelEdit();
+        }
+    }
+
+    private async Task DeleteAsync(GroupDto group)
+    {
+        if (!await JS.InvokeAsync<bool>("confirm", $"Remove \"{group.Name}\"? Campaign history for this group is kept."))
+        {
+            return;
+        }
+        await RunAsync(async () =>
+        {
+            await GroupService.DeleteAsync(group.Id);
+            await LoadAsync();
+        }, "Group removed.");
+    }
+
+    private sealed class GroupForm
+    {
+        [System.ComponentModel.DataAnnotations.Required(ErrorMessage = "Enter the group URL.")]
+        public string Url { get; set; } = string.Empty;
+
+        public string? Name { get; set; }
+
+        public string? Notes { get; set; }
+
+        public bool IsActive { get; set; } = true;
+    }
+}

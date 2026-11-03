@@ -1,0 +1,103 @@
+using FacebookPublisher.Domain.Entities;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+
+namespace FacebookPublisher.Infrastructure.Persistence;
+
+internal sealed class FacebookGroupConfiguration : IEntityTypeConfiguration<FacebookGroup>
+{
+    public void Configure(EntityTypeBuilder<FacebookGroup> builder)
+    {
+        builder.ToTable("FacebookGroups");
+        builder.Property(g => g.Name).HasMaxLength(200).IsRequired();
+        builder.Property(g => g.Url).HasMaxLength(300).IsRequired();
+        builder.Property(g => g.Notes).HasMaxLength(1000);
+        builder.HasIndex(g => g.Url).IsUnique();
+        builder.HasIndex(g => g.Name);
+    }
+}
+
+internal sealed class ContentPostConfiguration : IEntityTypeConfiguration<ContentPost>
+{
+    public void Configure(EntityTypeBuilder<ContentPost> builder)
+    {
+        builder.ToTable("ContentPosts");
+        builder.Property(c => c.Title).HasMaxLength(200).IsRequired();
+        builder.Property(c => c.Text).HasMaxLength(20_000);
+        builder.Property(c => c.ContentHash).HasMaxLength(64).IsRequired();
+        builder.HasIndex(c => c.ContentHash);
+        builder.HasMany(c => c.Attachments)
+            .WithOne(a => a.ContentPost)
+            .HasForeignKey(a => a.ContentPostId)
+            .OnDelete(DeleteBehavior.Cascade);
+    }
+}
+
+internal sealed class ContentAttachmentConfiguration : IEntityTypeConfiguration<ContentAttachment>
+{
+    public void Configure(EntityTypeBuilder<ContentAttachment> builder)
+    {
+        builder.ToTable("ContentAttachments");
+        builder.Property(a => a.OriginalFileName).HasMaxLength(260).IsRequired();
+        builder.Property(a => a.StoredFileName).HasMaxLength(100).IsRequired();
+        builder.Property(a => a.MimeType).HasMaxLength(100).IsRequired();
+        builder.Property(a => a.Sha256).HasMaxLength(64).IsRequired();
+    }
+}
+
+internal sealed class CampaignConfiguration : IEntityTypeConfiguration<Campaign>
+{
+    public void Configure(EntityTypeBuilder<Campaign> builder)
+    {
+        builder.ToTable("Campaigns");
+        builder.Property(c => c.Name).HasMaxLength(200).IsRequired();
+        builder.Property(c => c.StatusReason).HasMaxLength(2000);
+        builder.Property(c => c.RowVersion).IsRowVersion();
+        builder.Ignore(c => c.IsActive);
+        builder.Ignore(c => c.CanBeResumed);
+        builder.HasIndex(c => c.Status);
+        builder.HasIndex(c => c.CreatedAtUtc);
+        builder.HasOne(c => c.ContentPost)
+            .WithMany(p => p.Campaigns)
+            .HasForeignKey(c => c.ContentPostId)
+            .OnDelete(DeleteBehavior.Restrict);
+        builder.HasMany(c => c.Targets)
+            .WithOne(t => t.Campaign)
+            .HasForeignKey(t => t.CampaignId)
+            .OnDelete(DeleteBehavior.Cascade);
+    }
+}
+
+internal sealed class CampaignTargetConfiguration : IEntityTypeConfiguration<CampaignTarget>
+{
+    public void Configure(EntityTypeBuilder<CampaignTarget> builder)
+    {
+        builder.ToTable("CampaignTargets");
+        builder.Property(t => t.GroupName).HasMaxLength(200).IsRequired();
+        builder.Property(t => t.GroupUrl).HasMaxLength(300).IsRequired();
+        builder.Property(t => t.ErrorMessage).HasMaxLength(2000);
+        builder.Ignore(t => t.IsProcessable);
+        builder.Ignore(t => t.IsTerminal);
+
+        // One row per group per campaign: the database itself refuses duplicate targets.
+        builder.HasIndex(t => new { t.CampaignId, t.FacebookGroupId }).IsUnique();
+        builder.HasIndex(t => new { t.GroupUrl, t.Status, t.PublishedAtUtc });
+        builder.HasIndex(t => t.UpdatedAtUtc);
+
+        builder.HasOne(t => t.FacebookGroup)
+            .WithMany(g => g.CampaignTargets)
+            .HasForeignKey(t => t.FacebookGroupId)
+            .OnDelete(DeleteBehavior.SetNull);
+    }
+}
+
+internal sealed class PublisherSettingsConfiguration : IEntityTypeConfiguration<PublisherSettings>
+{
+    public void Configure(EntityTypeBuilder<PublisherSettings> builder)
+    {
+        builder.ToTable("PublisherSettings");
+        builder.Property(s => s.Id).ValueGeneratedNever();
+        builder.Property(s => s.BrowserProfilePath).HasMaxLength(500).IsRequired();
+        builder.Property(s => s.BrowserChannel).HasMaxLength(40);
+    }
+}

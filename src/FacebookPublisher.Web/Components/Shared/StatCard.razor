@@ -1,0 +1,23 @@
+<div class="stat-card">
+    <div class="stat-icon tone-@Tone"><i class="bi @Icon"></i></div>
+    <div>
+        <div class="stat-value">@Value</div>
+        <div class="stat-label">@Label</div>
+        @if (!string.IsNullOrEmpty(Hint))
+        {
+            <div class="form-text mt-0">@Hint</div>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public string Label { get; set; } = string.Empty;
+
+    [Parameter, EditorRequired] public string Value { get; set; } = string.Empty;
+
+    [Parameter] public string Icon { get; set; } = "bi-circle";
+
+    [Parameter] public string Tone { get; set; } = "indigo";
+
+    [Parameter] public string? Hint { get; set; }
+}

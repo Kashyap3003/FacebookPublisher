@@ -1,0 +1,164 @@
+﻿@page "/"
+@inherits AppComponentBase
+@implements IDisposable
+@inject ReportService Reports
+@inject CampaignEventBroker Broker
+
+<PageTitle>Dashboard · Group Publisher</PageTitle>
+
+<div class="page-header">
+    <div>
+        <h1>Dashboard</h1>
+        <p>Overview of your groups, content and publishing activity.</p>
+    </div>
+    <a class="btn btn-primary" href="campaigns/new"><i class="bi bi-send"></i> New campaign</a>
+</div>
+
+<AlertBox Errors="Errors" />
+
+@if (_data is null)
+{
+    <div class="empty-state"><i class="bi bi-hourglass-split"></i>Loading…</div>
+}
+else
+{
+    @if (_data.SessionLastVerifiedResult != true)
+    {
+        <div class="halt-banner d-flex flex-wrap gap-3 align-items-center justify-content-between">
+            <div>
+                <i class="bi bi-shield-exclamation me-1"></i>
+                @if (_data.SessionLastVerifiedResult == false)
+                {
+                    <span>The last Facebook session check (@Fmt.Relative(_data.SessionLastVerifiedAtUtc)) found that you are <strong>not logged in</strong>.</span>
+                }
+                else
+                {
+                    <span>The Facebook session has not been verified yet.</span>
+                }
+            </div>
+            <a class="btn btn-sm btn-outline-danger" href="settings"><i class="bi bi-box-arrow-in-right"></i> Log in / verify</a>
+        </div>
+    }
+
+    <div class="stat-grid">
+        <StatCard Label="Groups" Value="@($"{_data.ActiveGroups} / {_data.TotalGroups}")" Hint="active / total" Icon="bi-people" Tone="indigo" />
+        <StatCard Label="Verified member" Value="@_data.MemberGroups.ToString()" Hint="groups with access" Icon="bi-person-check" Tone="sky" />
+        <StatCard Label="Content items" Value="@_data.TotalContents.ToString()" Icon="bi-collection" Tone="slate" />
+        <StatCard Label="Campaigns" Value="@_data.TotalCampaigns.ToString()" Icon="bi-megaphone" Tone="amber" />
+        <StatCard Label="Posts published" Value="@_data.TotalPublished.ToString()" Hint="@($"{_data.PublishedLast7Days} in the last 7 days")" Icon="bi-check2-circle" Tone="green" />
+        <StatCard Label="Success rate" Value="@($"{_data.SuccessRate:0.#}%")" Hint="@($"{_data.TotalFailed} failed")" Icon="bi-graph-up" Tone="@(_data.TotalFailed > 0 ? "red" : "green")" />
+    </div>
+
+    <div class="row g-3">
+        <div class="col-lg-5">
+            <div class="card-panel h-100">
+                <h2><i class="bi bi-activity"></i> Current campaign</h2>
+                @if (_data.ActiveCampaign is { } active)
+                {
+                    <div class="d-flex justify-content-between align-items-start mb-2">
+                        <div>
+                            <div class="fw-semibold">@active.Name</div>
+                            <div class="form-text mt-0">@active.ContentTitle</div>
+                        </div>
+                        <StatusBadge Value="active.Status" />
+                    </div>
+                    <div class="progress progress-thick mb-2">
+                        <div class="progress-bar bg-success" style="width:@(Pct(active.Counts.Published, active.Counts.Total))%"></div>
+                        <div class="progress-bar bg-warning" style="width:@(Pct(active.Counts.Skipped, active.Counts.Total))%"></div>
+                        <div class="progress-bar bg-danger" style="width:@(Pct(active.Counts.Failed + active.Counts.Inaccessible, active.Counts.Total))%"></div>
+                    </div>
+                    <div class="d-flex justify-content-between form-text mb-3">
+                        <span>@active.Counts.Processed of @active.Counts.Total groups processed</span>
+                        <span>@active.Counts.Published published</span>
+                    </div>
+                    <a class="btn btn-outline-primary btn-sm" href="monitor/@active.Id"><i class="bi bi-display"></i> Open monitor</a>
+                }
+                else
+                {
+                    <div class="empty-state py-4">
+                        <i class="bi bi-moon-stars"></i>
+                        No campaign is running.
+                    </div>
+                }
+            </div>
+        </div>
+        <div class="col-lg-7">
+            <div class="card-panel h-100">
+                <h2><i class="bi bi-clock-history"></i> Recent publishing activity</h2>
+                @if (_data.RecentActivity.Count == 0)
+                {
+                    <div class="empty-state py-4"><i class="bi bi-inbox"></i>No activity yet.</div>
+                }
+                else
+                {
+                    <div class="table-wrap">
+                        <table class="table table-app table-hover">
+                            <thead>
+                                <tr><th>Group</th><th>Campaign</th><th>Status</th><th>When</th></tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var a in _data.RecentActivity)
+                                {
+                                    <tr>
+                                        <td>
+                                            <a href="@a.GroupUrl" target="_blank" rel="noopener">@a.GroupName</a>
+                                            @if (!string.IsNullOrEmpty(a.Message))
+                                            {
+                                                <div class="msg-cell">@a.Message</div>
+                                            }
+                                        </td>
+                                        <td><a href="reports/@a.CampaignId">@a.CampaignName</a></td>
+                                        <td><StatusBadge Value="a.Status" /></td>
+                                        <td class="text-nowrap" title="@Fmt.Time(a.TimestampUtc)">@Fmt.Relative(a.TimestampUtc)</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                }
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private DashboardDto? _data;
+    private int _refreshQueued;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+        Broker.TargetChanged += OnTargetChanged;
+        Broker.CampaignChanged += OnCampaignChanged;
+    }
+
+    private Task LoadAsync() => RunAsync(async () => _data = await Reports.GetDashboardAsync());
+
+    private Task OnTargetChanged(Guid campaignId, TargetProgressDto target, CampaignCountsDto counts) => QueueRefresh();
+
+    private Task OnCampaignChanged(CampaignProgressDto campaign) => QueueRefresh();
+
+    // Coalesces bursts of events into at most one reload per second.
+    private async Task QueueRefresh()
+    {
+        if (Interlocked.Exchange(ref _refreshQueued, 1) == 1)
+        {
+            return;
+        }
+        await Task.Delay(1000);
+        Interlocked.Exchange(ref _refreshQueued, 0);
+        await InvokeAsync(async () =>
+        {
+            await LoadAsync();
+            StateHasChanged();
+        });
+    }
+
+    private static int Pct(int value, int total) => total == 0 ? 0 : value * 100 / total;
+
+    public void Dispose()
+    {
+        Broker.TargetChanged -= OnTargetChanged;
+        Broker.CampaignChanged -= OnCampaignChanged;
+    }
+}

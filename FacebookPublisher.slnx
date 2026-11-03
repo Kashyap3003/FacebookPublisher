@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/FacebookPublisher.Application/FacebookPublisher.Application.csproj" />
+    <Project Path="src/FacebookPublisher.BrowserAutomation/FacebookPublisher.BrowserAutomation.csproj" />
+    <Project Path="src/FacebookPublisher.Domain/FacebookPublisher.Domain.csproj" />
+    <Project Path="src/FacebookPublisher.Infrastructure/FacebookPublisher.Infrastructure.csproj" />
+    <Project Path="src/FacebookPublisher.Web/FacebookPublisher.Web.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/FacebookPublisher.Tests/FacebookPublisher.Tests.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,80 @@
+@page "/reports"
+@inherits AppComponentBase
+@inject CampaignService CampaignService
+
+<PageTitle>Reports · Group Publisher</PageTitle>
+
+<div class="page-header">
+    <div>
+        <h1>Reports</h1>
+        <p>Campaign history with results per group. Export any campaign to Excel or CSV.</p>
+    </div>
+    <input class="form-control" style="max-width:260px" placeholder="Search campaigns…" @bind="_search" @bind:event="oninput" />
+</div>
+
+<AlertBox Errors="Errors" />
+
+<div class="card-panel">
+    @if (_campaigns is null)
+    {
+        <div class="empty-state"><i class="bi bi-hourglass-split"></i>Loading…</div>
+    }
+    else if (_campaigns.Count == 0)
+    {
+        <div class="empty-state"><i class="bi bi-file-earmark-bar-graph"></i>No campaigns yet.</div>
+    }
+    else
+    {
+        <div class="table-wrap">
+            <table class="table table-app table-hover">
+                <thead>
+                    <tr>
+                        <th>Campaign</th>
+                        <th>Status</th>
+                        <th class="text-end">Groups</th>
+                        <th class="text-end">Published</th>
+                        <th class="text-end">Skipped</th>
+                        <th class="text-end">Failed</th>
+                        <th>Created</th>
+                        <th>Duration</th>
+                        <th class="text-end">Export</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var c in Filtered)
+                    {
+                        <tr>
+                            <td>
+                                <a class="fw-semibold" href="reports/@c.Id">@c.Name</a>
+                                <div class="form-text mt-0">@c.ContentTitle</div>
+                            </td>
+                            <td><StatusBadge Value="c.Status" Title="@c.StatusReason" /></td>
+                            <td class="text-end">@c.Counts.Total</td>
+                            <td class="text-end text-success fw-semibold">@c.Counts.Published</td>
+                            <td class="text-end text-warning">@c.Counts.Skipped</td>
+                            <td class="text-end text-danger">@(c.Counts.Failed + c.Counts.Inaccessible)</td>
+                            <td class="text-nowrap small">@Fmt.Time(c.CreatedAtUtc)</td>
+                            <td class="text-nowrap small">@Fmt.Duration(c.StartedAtUtc, c.CompletedAtUtc)</td>
+                            <td class="text-end text-nowrap">
+                                <a class="btn btn-sm btn-outline-success" href="reports/@c.Id/export/xlsx" download><i class="bi bi-file-earmark-excel"></i> Excel</a>
+                                <a class="btn btn-sm btn-outline-secondary" href="reports/@c.Id/export/csv" download><i class="bi bi-filetype-csv"></i> CSV</a>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+</div>
+
+@code {
+    private List<CampaignSummaryDto>? _campaigns;
+    private string _search = string.Empty;
+
+    private IEnumerable<CampaignSummaryDto> Filtered => string.IsNullOrWhiteSpace(_search)
+        ? _campaigns!
+        : _campaigns!.Where(c => c.Name.Contains(_search, StringComparison.OrdinalIgnoreCase) || c.ContentTitle.Contains(_search, StringComparison.OrdinalIgnoreCase));
+
+    protected override async Task OnInitializedAsync() =>
+        await RunAsync(async () => _campaigns = (await CampaignService.ListAsync()).ToList());
+}

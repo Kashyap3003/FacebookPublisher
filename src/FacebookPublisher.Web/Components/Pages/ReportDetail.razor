@@ -1,0 +1,127 @@
+@page "/reports/{Id:guid}"
+@inherits AppComponentBase
+@inject ReportService ReportService
+
+<PageTitle>Campaign Report · Group Publisher</PageTitle>
+
+<AlertBox Errors="Errors" />
+
+@if (_report is not null)
+{
+    var c = _report.Counts;
+    <div class="page-header">
+        <div>
+            <div class="small"><a href="reports"><i class="bi bi-arrow-left"></i> All reports</a></div>
+            <h1>@_report.CampaignName</h1>
+            <p>Content: <strong>@_report.ContentTitle</strong> · generated @Fmt.Time(_report.GeneratedAtUtc)</p>
+        </div>
+        <div class="d-flex gap-2">
+            @if (_report.Status is CampaignStatus.Queued or CampaignStatus.Running or CampaignStatus.Halted)
+            {
+                <a class="btn btn-outline-primary" href="monitor/@_report.CampaignId"><i class="bi bi-activity"></i> Monitor</a>
+            }
+            <a class="btn btn-success" href="reports/@_report.CampaignId/export/xlsx" download><i class="bi bi-file-earmark-excel"></i> Export Excel</a>
+            <a class="btn btn-outline-secondary" href="reports/@_report.CampaignId/export/csv" download><i class="bi bi-filetype-csv"></i> Export CSV</a>
+        </div>
+    </div>
+
+    <div class="stat-grid">
+        <StatCard Label="Groups provided" Value="@c.Total.ToString()" Icon="bi-people" Tone="indigo" />
+        <StatCard Label="Published" Value="@c.Published.ToString()" Icon="bi-check2-circle" Tone="green" />
+        <StatCard Label="Skipped" Value="@c.Skipped.ToString()" Icon="bi-skip-forward" Tone="amber" />
+        <StatCard Label="Inaccessible" Value="@c.Inaccessible.ToString()" Icon="bi-eye-slash" Tone="slate" />
+        <StatCard Label="Failed" Value="@c.Failed.ToString()" Icon="bi-x-octagon" Tone="red" />
+        @if (c.Cancelled + c.Remaining > 0)
+        {
+            <StatCard Label="Not processed" Value="@((c.Cancelled + c.Remaining).ToString())" Hint="cancelled or remaining" Icon="bi-dash-circle" Tone="slate" />
+        }
+    </div>
+
+    <div class="row g-3">
+        <div class="col-lg-4">
+            <div class="card-panel h-100">
+                <h2><i class="bi bi-info-circle"></i> Summary</h2>
+                <dl class="kv">
+                    <dt>Status</dt><dd><StatusBadge Value="_report.Status" /></dd>
+                    @if (!string.IsNullOrEmpty(_report.StatusReason))
+                    {
+                        <dt>Reason</dt><dd class="small">@_report.StatusReason</dd>
+                    }
+                    <dt>Created</dt><dd>@Fmt.Time(_report.CreatedAtUtc)</dd>
+                    <dt>Started</dt><dd>@Fmt.Time(_report.StartedAtUtc)</dd>
+                    <dt>Completed</dt><dd>@Fmt.Time(_report.CompletedAtUtc)</dd>
+                    <dt>Duration</dt><dd>@Fmt.Duration(_report.StartedAtUtc, _report.CompletedAtUtc)</dd>
+                    <dt>Delay</dt><dd>@_report.MinDelaySeconds–@_report.MaxDelaySeconds s</dd>
+                    <dt>Review</dt><dd>@(_report.RequireApproval ? "Each post reviewed" : "Automatic")</dd>
+                </dl>
+            </div>
+        </div>
+        <div class="col-lg-8">
+            <div class="card-panel h-100">
+                <h2><i class="bi bi-question-circle"></i> Reasons for skipped and failed groups</h2>
+                @if (_report.Reasons.Count == 0)
+                {
+                    <div class="empty-state py-3"><i class="bi bi-emoji-smile"></i>Nothing was skipped or failed.</div>
+                }
+                else
+                {
+                    <div class="table-wrap">
+                        <table class="table table-app">
+                            <thead><tr><th>Category</th><th>Reason</th><th class="text-end">Groups</th></tr></thead>
+                            <tbody>
+                                @foreach (var r in _report.Reasons)
+                                {
+                                    <tr>
+                                        <td class="text-nowrap">@r.Category</td>
+                                        <td class="small">@r.Reason</td>
+                                        <td class="text-end fw-semibold">@r.Count</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                }
+            </div>
+        </div>
+    </div>
+
+    <div class="card-panel mt-3">
+        <h2><i class="bi bi-list-check"></i> Results per group</h2>
+        <div class="table-wrap">
+            <table class="table table-app">
+                <thead>
+                    <tr><th>#</th><th>Group</th><th>Membership</th><th>Publishing status</th><th>Published at</th><th>Error / details</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var t in _report.Targets)
+                    {
+                        <tr>
+                            <td class="text-muted">@(t.Order + 1)</td>
+                            <td>
+                                <div class="fw-semibold">@t.GroupName</div>
+                                <div class="url-cell"><a href="@t.GroupUrl" target="_blank" rel="noopener">@t.GroupUrl</a></div>
+                            </td>
+                            <td><StatusBadge Value="t.MembershipStatus" /></td>
+                            <td><StatusBadge Value="t.Status" /></td>
+                            <td class="text-nowrap small">@Fmt.Time(t.PublishedAtUtc)</td>
+                            <td class="msg-cell">@t.ErrorMessage</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+}
+else if (Errors.Count == 0)
+{
+    <div class="empty-state"><i class="bi bi-hourglass-split"></i>Loading…</div>
+}
+
+@code {
+    [Parameter] public Guid Id { get; set; }
+
+    private CampaignReportDto? _report;
+
+    protected override async Task OnParametersSetAsync() =>
+        await RunAsync(async () => _report = await ReportService.GetCampaignReportAsync(Id));
+}

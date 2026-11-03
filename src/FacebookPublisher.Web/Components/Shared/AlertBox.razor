@@ -1,0 +1,34 @@
+@if (Errors.Count > 0)
+{
+    <div class="alert alert-danger d-flex gap-2" role="alert">
+        <i class="bi bi-exclamation-octagon"></i>
+        <div>
+            @if (Errors.Count == 1)
+            {
+                @Errors[0]
+            }
+            else
+            {
+                <ul class="mb-0 ps-3">
+                    @foreach (var error in Errors)
+                    {
+                        <li>@error</li>
+                    }
+                </ul>
+            }
+        </div>
+    </div>
+}
+@if (!string.IsNullOrEmpty(Success))
+{
+    <div class="alert alert-success d-flex gap-2" role="status">
+        <i class="bi bi-check-circle"></i>
+        <div>@Success</div>
+    </div>
+}
+
+@code {
+    [Parameter] public IReadOnlyList<string> Errors { get; set; } = [];
+
+    [Parameter] public string? Success { get; set; }
+}

@@ -1,0 +1,59 @@
+<span class="status-badge @_css" title="@Title">
+    @if (_spinning)
+    {
+        <i class="bi bi-arrow-repeat spin"></i>
+    }
+    @_text
+</span>
+
+@code {
+    [Parameter, EditorRequired] public Enum Value { get; set; } = default!;
+
+    [Parameter] public string? Title { get; set; }
+
+    private string _css = "s-neutral";
+    private string _text = string.Empty;
+    private bool _spinning;
+
+    protected override void OnParametersSet()
+    {
+        _spinning = false;
+        (_text, _css) = Value switch
+        {
+            TargetStatus t => (t.ToDisplay(), t switch
+            {
+                TargetStatus.Pending => "s-neutral",
+                TargetStatus.CheckingMembership or TargetStatus.Publishing => Spin("s-progress"),
+                TargetStatus.Eligible => "s-info",
+                TargetStatus.AwaitingApproval => "s-action",
+                TargetStatus.Published => "s-success",
+                TargetStatus.SkippedNotMember or TargetStatus.SkippedDuplicate or TargetStatus.SkippedByUser => "s-warning",
+                TargetStatus.Failed or TargetStatus.Inaccessible => "s-danger",
+                _ => "s-neutral"
+            }),
+            CampaignStatus c => (c.ToDisplay(), c switch
+            {
+                CampaignStatus.Queued => "s-info",
+                CampaignStatus.Running => Spin("s-progress"),
+                CampaignStatus.Completed => "s-success",
+                CampaignStatus.CompletedWithErrors => "s-warning",
+                CampaignStatus.Halted => "s-danger",
+                _ => "s-neutral"
+            }),
+            MembershipStatus m => (m.ToDisplay(), m switch
+            {
+                MembershipStatus.Member => "s-success",
+                MembershipStatus.NotMember => "s-warning",
+                MembershipStatus.Inaccessible => "s-danger",
+                _ => "s-neutral"
+            }),
+            _ => (Value.ToString(), "s-neutral")
+        };
+    }
+
+    private string Spin(string css)
+    {
+        _spinning = true;
+        return css;
+    }
+}

@@ -1,0 +1,54 @@
+﻿@implements IDisposable
+@inject CampaignEventBroker Broker
+@inject FacebookPublisher.Application.Abstractions.ICampaignExecutionTracker Tracker
+@inject Microsoft.Extensions.Options.IOptions<HostingOptions> Hosting
+
+<div class="brand">
+    <span class="brand-icon"><i class="bi bi-broadcast"></i></span>
+    <div>
+        <div class="brand-name">Group Publisher</div>
+        <div class="brand-sub">Content distribution</div>
+    </div>
+</div>
+
+<nav class="menu">
+    <NavLink class="menu-link" href="" Match="NavLinkMatch.All"><i class="bi bi-speedometer2"></i> Dashboard</NavLink>
+    <NavLink class="menu-link" href="groups"><i class="bi bi-people"></i> Facebook Groups</NavLink>
+    <NavLink class="menu-link" href="content"><i class="bi bi-pencil-square"></i> Content Composer</NavLink>
+    <NavLink class="menu-link" href="campaigns/new"><i class="bi bi-send"></i> Publishing Campaign</NavLink>
+    <NavLink class="menu-link" href="monitor">
+        <i class="bi bi-activity"></i> Execution Monitor
+        @if (_running)
+        {
+            <span class="live-dot" title="A campaign is running"></span>
+        }
+    </NavLink>
+    <NavLink class="menu-link" href="reports"><i class="bi bi-file-earmark-bar-graph"></i> Reports</NavLink>
+    <NavLink class="menu-link" href="settings"><i class="bi bi-gear"></i> Settings</NavLink>
+    @if (Hosting.Value.RequireLogin)
+    {
+        <a class="menu-link" href="logout" data-enhance-nav="false"><i class="bi bi-box-arrow-right"></i> Sign out</a>
+    }
+</nav>
+
+<div class="menu-footer">
+    Posts are only made to groups this account already belongs to. The app stops whenever Facebook asks for verification.
+</div>
+
+@code {
+    private bool _running;
+
+    protected override void OnInitialized()
+    {
+        _running = Tracker.ActiveCampaignId is not null;
+        Broker.CampaignChanged += OnCampaignChanged;
+    }
+
+    private Task OnCampaignChanged(CampaignProgressDto campaign) => InvokeAsync(() =>
+    {
+        _running = campaign.Status == CampaignStatus.Running || Tracker.ActiveCampaignId is not null;
+        StateHasChanged();
+    });
+
+    public void Dispose() => Broker.CampaignChanged -= OnCampaignChanged;
+}

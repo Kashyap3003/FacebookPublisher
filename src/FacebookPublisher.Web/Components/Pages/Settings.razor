@@ -1,0 +1,212 @@
+@page "/settings"
+@inherits AppComponentBase
+@inject SettingsService SettingsService
+@inject BrowserSessionService Session
+@inject FacebookPublisher.Application.Abstractions.ICampaignExecutionTracker Tracker
+
+<PageTitle>Settings · Group Publisher</PageTitle>
+
+<div class="page-header">
+    <div>
+        <h1>Settings</h1>
+        <p>Facebook session, publishing pace and browser configuration.</p>
+    </div>
+</div>
+
+<AlertBox Errors="Errors" Success="@Success" />
+
+@if (_model is null)
+{
+    <div class="empty-state"><i class="bi bi-hourglass-split"></i>Loading…</div>
+}
+else
+{
+    <div class="card-panel">
+        <h2><i class="bi bi-person-badge"></i> Facebook session</h2>
+        <div class="row g-3 align-items-center">
+            <div class="col-lg-7">
+                <p class="mb-2">
+                    This application never asks for or stores your Facebook password. It uses a dedicated browser profile:
+                    open the login window, sign in to Facebook yourself (including any 2-factor step), and the session is reused for publishing.
+                </p>
+                <div class="d-flex align-items-center gap-2">
+                    <span class="text-muted">Last verification:</span>
+                    @if (_model.SessionLastVerifiedResult is null)
+                    {
+                        <span class="status-badge s-neutral">Not verified</span>
+                    }
+                    else if (_model.SessionLastVerifiedResult == true)
+                    {
+                        <span class="status-badge s-success"><i class="bi bi-check-circle"></i> Logged in</span>
+                    }
+                    else
+                    {
+                        <span class="status-badge s-danger"><i class="bi bi-x-circle"></i> Not logged in</span>
+                    }
+                    <span class="text-muted small">@Fmt.Relative(_model.SessionLastVerifiedAtUtc)</span>
+                </div>
+                @if (_sessionMessage is not null)
+                {
+                    <div class="small mt-2">@_sessionMessage</div>
+                }
+            </div>
+            <div class="col-lg-5 d-flex flex-wrap gap-2 justify-content-lg-end">
+                <button class="btn btn-primary" disabled="@(Busy || CampaignActive)" @onclick="OpenLoginAsync"><i class="bi bi-box-arrow-in-right"></i> Open login window</button>
+                <button class="btn btn-outline-primary" disabled="@(Busy || CampaignActive)" @onclick="VerifyAsync">
+                    @if (_verifying)
+                    {
+                        <span><i class="bi bi-arrow-repeat spin"></i> Verifying…</span>
+                    }
+                    else
+                    {
+                        <span><i class="bi bi-shield-check"></i> Verify session</span>
+                    }
+                </button>
+                <button class="btn btn-outline-secondary" disabled="@(Busy || CampaignActive || !Session.IsBrowserOpen)" @onclick="CloseBrowserAsync"><i class="bi bi-x-square"></i> Close browser</button>
+            </div>
+        </div>
+        @if (CampaignActive)
+        {
+            <div class="form-text text-warning mt-2"><i class="bi bi-info-circle"></i> Browser controls are disabled while a campaign is running.</div>
+        }
+    </div>
+
+    <EditForm Model="_model" OnValidSubmit="SaveAsync" FormName="settings">
+        <DataAnnotationsValidator />
+        <div class="row g-3">
+            <div class="col-lg-6">
+                <div class="card-panel h-100">
+                    <h2><i class="bi bi-speedometer"></i> Publishing</h2>
+                    <div class="row g-2">
+                        <div class="col">
+                            <label class="form-label">Default min delay (s)</label>
+                            <InputNumber class="form-control" @bind-Value="_model.DefaultMinDelaySeconds" />
+                            <ValidationMessage For="() => _model.DefaultMinDelaySeconds" />
+                        </div>
+                        <div class="col">
+                            <label class="form-label">Default max delay (s)</label>
+                            <InputNumber class="form-control" @bind-Value="_model.DefaultMaxDelaySeconds" />
+                            <ValidationMessage For="() => _model.DefaultMaxDelaySeconds" />
+                        </div>
+                    </div>
+                    <div class="form-text mb-3">Pause between consecutive groups. Keep this generous; posting the same content rapidly to many groups is treated as spam by Facebook.</div>
+
+                    <div class="form-check form-switch mb-2">
+                        <InputCheckbox class="form-check-input" id="approval" @bind-Value="_model.RequireApprovalByDefault" />
+                        <label class="form-check-label" for="approval">Pause for approval before each post (off = fully automatic; default for new campaigns)</label>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Review timeout (minutes)</label>
+                        <InputNumber class="form-control" @bind-Value="_model.ApprovalTimeoutMinutes" />
+                        <ValidationMessage For="() => _model.ApprovalTimeoutMinutes" />
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Maximum groups per campaign</label>
+                        <InputNumber class="form-control" @bind-Value="_model.MaxGroupsPerCampaign" />
+                        <ValidationMessage For="() => _model.MaxGroupsPerCampaign" />
+                    </div>
+                    <div class="mb-1">
+                        <label class="form-label">Duplicate protection window (hours)</label>
+                        <InputNumber class="form-control" @bind-Value="_model.DuplicateWindowHours" />
+                        <ValidationMessage For="() => _model.DuplicateWindowHours" />
+                        <div class="form-text">Skip a group if the identical content was published there within this window. 0 disables the check.</div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-lg-6">
+                <div class="card-panel h-100">
+                    <h2><i class="bi bi-browser-chrome"></i> Browser</h2>
+                    <div class="mb-3">
+                        <label class="form-label">Browser</label>
+                        <InputSelect class="form-select" @bind-Value="_model.BrowserChannel">
+                            @foreach (var (value, label) in SettingsService.BrowserChannels)
+                            {
+                                <option value="@value">@label</option>
+                            }
+                        </InputSelect>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Browser profile folder</label>
+                        <InputText class="form-control" @bind-Value="_model.BrowserProfilePath" />
+                        <ValidationMessage For="() => _model.BrowserProfilePath" />
+                        <div class="form-text">Holds the cookies of your Facebook login. Use a dedicated folder; do not point it at your everyday browser profile.</div>
+                    </div>
+                    <div class="form-check form-switch mb-1">
+                        <InputCheckbox class="form-check-input" id="headless" @bind-Value="_model.Headless" />
+                        <label class="form-check-label" for="headless">Run hidden (headless) during campaigns</label>
+                    </div>
+                    <div class="form-text mb-3">Post review requires a visible window, and the login window is always visible.</div>
+                    <div class="row g-2">
+                        <div class="col">
+                            <label class="form-label">Page load timeout (s)</label>
+                            <InputNumber class="form-control" @bind-Value="_model.NavigationTimeoutSeconds" />
+                            <ValidationMessage For="() => _model.NavigationTimeoutSeconds" />
+                        </div>
+                        <div class="col">
+                            <label class="form-label">Upload timeout (s)</label>
+                            <InputNumber class="form-control" @bind-Value="_model.UploadTimeoutSeconds" />
+                            <ValidationMessage For="() => _model.UploadTimeoutSeconds" />
+                        </div>
+                    </div>
+                    <div class="form-text">Browser changes apply the next time the browser starts (use "Close browser").</div>
+                </div>
+            </div>
+        </div>
+        <div class="mt-3">
+            <button type="submit" class="btn btn-primary" disabled="@Busy"><i class="bi bi-save"></i> Save settings</button>
+        </div>
+    </EditForm>
+}
+
+@code {
+    private SettingsModel? _model;
+    private string? _sessionMessage;
+    private bool _verifying;
+
+    private bool CampaignActive => Tracker.ActiveCampaignId is not null;
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync() => await RunAsync(async () => _model = await SettingsService.GetAsync());
+
+    private async Task SaveAsync()
+    {
+        if (_model is null)
+        {
+            return;
+        }
+        await RunAsync(() => SettingsService.SaveAsync(_model), "Settings saved.");
+    }
+
+    private async Task OpenLoginAsync()
+    {
+        await RunAsync(async () =>
+        {
+            await Session.OpenLoginWindowAsync();
+            _sessionMessage = "A browser window has opened. Sign in to Facebook there, then click \"Verify session\".";
+        });
+    }
+
+    private async Task VerifyAsync()
+    {
+        _verifying = true;
+        await RunAsync(async () =>
+        {
+            var status = await Session.CheckSessionAsync();
+            _sessionMessage = status.Message;
+            var refreshed = await SettingsService.GetAsync();
+            _model!.SessionLastVerifiedAtUtc = refreshed.SessionLastVerifiedAtUtc;
+            _model.SessionLastVerifiedResult = refreshed.SessionLastVerifiedResult;
+        });
+        _verifying = false;
+    }
+
+    private async Task CloseBrowserAsync()
+    {
+        await RunAsync(async () =>
+        {
+            await Session.CloseBrowserAsync();
+            _sessionMessage = "Browser closed. It will restart with the current settings when needed.";
+        });
+    }
+}
