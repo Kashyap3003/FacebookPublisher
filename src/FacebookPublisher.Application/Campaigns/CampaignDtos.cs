@@ -7,8 +7,7 @@ public sealed record CreateCampaignRequest(
     string Name,
     Guid ContentId,
     IReadOnlyList<Guid> GroupIds,
-    int MinDelaySeconds,
-    int MaxDelaySeconds,
+    BatchPacingConfig Pacing,
     bool RequireApproval);
 
 public sealed record TargetProgressDto(
@@ -21,14 +20,23 @@ public sealed record TargetProgressDto(
     TargetStatus Status,
     DateTime? PublishedAtUtc,
     string? ErrorMessage,
-    DateTime UpdatedAtUtc)
+    DateTime UpdatedAtUtc,
+    int? BatchNumber = null)
 {
     public static TargetProgressDto From(CampaignTarget t) => new(
         t.Id, t.FacebookGroupId, t.GroupName, t.GroupUrl, t.Order, t.MembershipStatus, t.Status,
-        t.PublishedAtUtc, t.ErrorMessage, t.UpdatedAtUtc);
+        t.PublishedAtUtc, t.ErrorMessage, t.UpdatedAtUtc, t.BatchNumber);
 }
 
-public sealed record CampaignCountsDto(int Total, int Published, int Skipped, int Failed, int Inaccessible, int Cancelled, int Remaining)
+public sealed record CampaignCountsDto(
+    int Total,
+    int Published,
+    int Skipped,
+    int Failed,
+    int Inaccessible,
+    int Cancelled,
+    int Remaining,
+    int OutcomeUnknown = 0)
 {
     public int Processed => Total - Remaining;
 
@@ -45,7 +53,38 @@ public sealed record CampaignCountsDto(int Total, int Published, int Skipped, in
             list.Count(s => s == TargetStatus.Inaccessible),
             list.Count(s => s == TargetStatus.Cancelled),
             list.Count(s => s is TargetStatus.Pending or TargetStatus.CheckingMembership or TargetStatus.Eligible
-                or TargetStatus.Publishing or TargetStatus.AwaitingApproval));
+                or TargetStatus.Publishing or TargetStatus.AwaitingApproval),
+            list.Count(s => s == TargetStatus.OutcomeUnknown));
+    }
+}
+
+/// <summary>Persisted batch execution state, as shown in the Execution Monitor.</summary>
+public sealed record BatchProgressDto(
+    int CurrentBatchNumber,
+    int CurrentBatchSize,
+    int CurrentBatchProcessed,
+    int CompletedBatches,
+    int BatchesSinceExtendedDelay,
+    int EstimatedTotalBatches,
+    DelayKind CurrentDelayKind,
+    int CurrentDelaySeconds,
+    DateTime? CurrentDelayEndsAtUtc,
+    DateTime? LastExecutionAtUtc)
+{
+    public static BatchProgressDto From(Campaign c)
+    {
+        var remaining = c.Targets.Count(t => t.IsProcessable);
+        return new BatchProgressDto(
+            c.CurrentBatchNumber,
+            c.CurrentBatchSize,
+            c.CurrentBatchProcessed,
+            c.CompletedBatches,
+            c.BatchesSinceExtendedDelay,
+            PacingEstimator.EstimateTotalBatches(c, remaining),
+            c.CurrentDelayKind,
+            c.CurrentDelaySeconds,
+            c.CurrentDelayEndsAtUtc,
+            c.LastExecutionAtUtc);
     }
 }
 
@@ -57,12 +96,14 @@ public sealed record CampaignProgressDto(
     CampaignStatus Status,
     string? StatusReason,
     bool RequireApproval,
-    int MinDelaySeconds,
-    int MaxDelaySeconds,
+    BatchPacingConfig Pacing,
     DateTime CreatedAtUtc,
     DateTime? StartedAtUtc,
     DateTime? CompletedAtUtc,
+    bool CanStart,
+    bool CanStop,
     bool CanResume,
+    BatchProgressDto Batch,
     CampaignCountsDto Counts,
     IReadOnlyList<TargetProgressDto> Targets)
 {
@@ -74,12 +115,14 @@ public sealed record CampaignProgressDto(
         c.Status,
         c.StatusReason,
         c.RequireApproval,
-        c.MinDelaySeconds,
-        c.MaxDelaySeconds,
+        c.Pacing.Clone(),
         c.CreatedAtUtc,
         c.StartedAtUtc,
         c.CompletedAtUtc,
+        c.CanBeStarted,
+        c.CanBeStopped,
         c.CanBeResumed,
+        BatchProgressDto.From(c),
         CampaignCountsDto.From(c.Targets.Select(t => t.Status)),
         c.Targets.OrderBy(t => t.Order).Select(TargetProgressDto.From).ToList());
 }

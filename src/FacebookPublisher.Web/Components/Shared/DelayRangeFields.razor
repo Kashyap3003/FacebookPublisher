@@ -1,0 +1,61 @@
+@* Minimum / maximum / unit inputs for one delay range. *@
+<div class="@(Embedded ? string.Empty : "pacing-group")">
+    @if (!string.IsNullOrEmpty(Title))
+    {
+        <div class="pacing-title"><i class="bi @Icon"></i> @Title</div>
+    }
+    <div class="row g-2 align-items-end">
+        <div class="col-6 col-sm-3">
+            <label class="form-label" for="@($"{IdPrefix}-min")">Minimum</label>
+            <input id="@($"{IdPrefix}-min")" type="number" class="form-control @InvalidCss" min="0" step="1" disabled="@Disabled"
+                   @bind="Range.Min" @bind:after="ChangedAsync" />
+        </div>
+        <div class="col-6 col-sm-3">
+            <label class="form-label" for="@($"{IdPrefix}-max")">Maximum</label>
+            <input id="@($"{IdPrefix}-max")" type="number" class="form-control @InvalidCss" min="0" step="1" disabled="@Disabled"
+                   @bind="Range.Max" @bind:after="ChangedAsync" />
+        </div>
+        <div class="col-12 col-sm-6">
+            <label class="form-label" for="@($"{IdPrefix}-unit")">Unit</label>
+            <select id="@($"{IdPrefix}-unit")" class="form-select @InvalidCss" disabled="@Disabled" @bind="Range.Unit" @bind:after="ChangedAsync">
+                @foreach (var unit in Units)
+                {
+                    <option value="@unit">@DurationText.UnitText(unit)</option>
+                }
+            </select>
+        </div>
+    </div>
+    <Errors For="@Field" All="Errors" />
+    @if (!string.IsNullOrEmpty(Hint))
+    {
+        <div class="form-text">@Hint</div>
+    }
+</div>
+
+@code {
+    [Parameter] public string Title { get; set; } = string.Empty;
+
+    [Parameter] public string Icon { get; set; } = "bi-clock";
+
+    [Parameter] public string? Hint { get; set; }
+
+    [Parameter, EditorRequired] public DelayRange Range { get; set; } = default!;
+
+    [Parameter, EditorRequired] public IReadOnlyList<DelayUnit> Units { get; set; } = [];
+
+    [Parameter, EditorRequired] public string Field { get; set; } = string.Empty;
+
+    [Parameter] public string IdPrefix { get; set; } = "delay";
+
+    [Parameter] public bool Disabled { get; set; }
+
+    [Parameter] public bool Embedded { get; set; }
+
+    [Parameter] public IReadOnlyList<PacingError> Errors { get; set; } = [];
+
+    [Parameter] public EventCallback OnChanged { get; set; }
+
+    private string InvalidCss => Errors.Any(e => e.Field == Field) ? "is-invalid" : string.Empty;
+
+    private Task ChangedAsync() => OnChanged.InvokeAsync();
+}

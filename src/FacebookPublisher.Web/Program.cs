@@ -65,13 +65,9 @@ try
 
     var app = builder.Build();
 
-    // Migrate the database, recover interrupted campaigns and re-queue the ones still waiting.
-    var pending = await app.Services.GetRequiredService<DatabaseInitializer>().InitializeAsync();
-    var queue = app.Services.GetRequiredService<ICampaignQueue>();
-    foreach (var campaignId in pending)
-    {
-        await queue.EnqueueAsync(campaignId);
-    }
+    // Migrate the database and seed settings. No campaign is resumed or re-queued automatically: execution only
+    // starts when the user clicks Start or Resume.
+    await app.Services.GetRequiredService<DatabaseInitializer>().InitializeAsync();
 
     if (!app.Environment.IsDevelopment())
     {

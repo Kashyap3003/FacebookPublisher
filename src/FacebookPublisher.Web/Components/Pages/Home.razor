@@ -2,6 +2,7 @@
 @inherits AppComponentBase
 @implements IDisposable
 @inject ReportService Reports
+@inject CampaignService CampaignService
 @inject CampaignEventBroker Broker
 
 <PageTitle>Dashboard · Group Publisher</PageTitle>
@@ -127,6 +128,8 @@ else
 
     protected override async Task OnInitializedAsync()
     {
+        // Opening the app is the manual trigger for recovering campaigns interrupted by an application stop.
+        await RunAsync(() => CampaignService.ReconcileOrphanedCampaignsAsync());
         await LoadAsync();
         Broker.TargetChanged += OnTargetChanged;
         Broker.CampaignChanged += OnCampaignChanged;

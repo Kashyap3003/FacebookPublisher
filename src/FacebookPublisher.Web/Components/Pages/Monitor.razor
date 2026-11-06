@@ -12,18 +12,22 @@
 <div class="page-header">
     <div>
         <h1>Execution Monitor</h1>
-        <p>Live progress of the publishing campaign — every step is shown as it happens.</p>
+        <p>Live progress of the publishing campaign — every step, batch and delay is shown as it happens.</p>
     </div>
     @if (_campaign is not null)
     {
-        <div class="d-flex gap-2">
-            @if (_campaign.Status is CampaignStatus.Queued or CampaignStatus.Running or CampaignStatus.Halted)
+        <div class="d-flex flex-wrap gap-2">
+            @if (_campaign.CanStart)
             {
-                <button class="btn btn-outline-danger" disabled="@Busy" @onclick="CancelAsync"><i class="bi bi-stop-circle"></i> Cancel campaign</button>
+                <button class="btn btn-primary" disabled="@Busy" @onclick="StartAsync"><i class="bi bi-play-fill"></i> Start campaign</button>
+            }
+            @if (_campaign.CanStop)
+            {
+                <button class="btn btn-outline-danger" disabled="@Busy" @onclick="StopAsync"><i class="bi bi-stop-circle"></i> Stop campaign</button>
             }
             @if (_campaign.CanResume)
             {
-                <button class="btn btn-primary" disabled="@Busy" @onclick="ResumeAsync"><i class="bi bi-play-fill"></i> Resume</button>
+                <button class="btn btn-primary" disabled="@Busy" @onclick="ResumeAsync"><i class="bi bi-play-fill"></i> Resume campaign</button>
             }
             <a class="btn btn-outline-secondary" href="reports/@_campaign.Id"><i class="bi bi-file-earmark-text"></i> Report</a>
         </div>
@@ -46,10 +50,14 @@ else if (_campaign is null)
 else
 {
     var counts = _campaign.Counts;
+    var batch = _campaign.Batch;
     var awaiting = _campaign.Targets.FirstOrDefault(t => t.Status == TargetStatus.AwaitingApproval);
     var current = _campaign.Targets.FirstOrDefault(t => t.Status is TargetStatus.CheckingMembership or TargetStatus.Eligible
         or TargetStatus.Publishing or TargetStatus.AwaitingApproval);
+    var unknown = _campaign.Targets.Where(t => t.Status == TargetStatus.OutcomeUnknown).ToList();
     var latest = _activity.Count > 0 ? _activity[^1] : null;
+    var delayLeft = DelayRemaining;
+    var running = _campaign.Status == CampaignStatus.Running;
 
     @if (awaiting is not null)
     {
@@ -59,7 +67,7 @@ else
                 <div class="small">The post has been prepared in the browser window. Approve to publish or reject to skip this group.
                     @if (_approvalDeadline is { } deadline && deadline > DateTime.UtcNow)
                     {
-                        <span class="text-muted">Review times out in @Countdown(deadline).</span>
+                        <span class="text-muted">Review times out in @Countdown(deadline - DateTime.UtcNow).</span>
                     }
                 </div>
             </div>
@@ -70,17 +78,67 @@ else
         </div>
     }
 
-    @if (_campaign.Status == CampaignStatus.Halted)
+    @if (_campaign.Status is CampaignStatus.Halted or CampaignStatus.Interrupted or CampaignStatus.Stopped)
     {
-        <div class="halt-banner">
-            <div class="fw-semibold mb-1"><i class="bi bi-sign-stop"></i> Campaign halted — manual intervention required</div>
+        <div class="@(_campaign.Status == CampaignStatus.Stopped ? "info-banner" : "halt-banner")">
+            <div class="fw-semibold mb-1">
+                <i class="bi @(_campaign.Status == CampaignStatus.Stopped ? "bi-pause-circle" : "bi-sign-stop")"></i>
+                Campaign @_campaign.Status.ToDisplay().ToLowerInvariant()
+            </div>
             <div class="small">@_campaign.StatusReason</div>
             <div class="small mt-2">
-                <a href="settings">Go to Settings</a> to open the login window or verify the session.
+                @if (_campaign.Status == CampaignStatus.Halted)
+                {
+                    <span><a href="settings">Go to Settings</a> to open the login window or verify the session. </span>
+                }
                 @if (_campaign.CanResume)
                 {
-                    <span>Then press <strong>Resume</strong>; groups already processed are never posted to again.</span>
+                    <span>Press <strong>Resume campaign</strong> to continue with the @counts.Remaining remaining group(s). Groups already published are never posted to again.</span>
                 }
+                @if (delayLeft is { } left)
+                {
+                    <span> Resume will first wait the remaining <strong>@DurationText.Format(left)</strong> of the interrupted @DurationText.Describe(batch.CurrentDelayKind).ToLowerInvariant() delay.</span>
+                }
+            </div>
+        </div>
+    }
+
+    @if (unknown.Count > 0)
+    {
+        <div class="card-panel unknown-panel">
+            <h2><i class="bi bi-question-diamond"></i> Outcome unknown — manual verification needed (@unknown.Count)</h2>
+            <p class="small mb-3">
+                The application stopped while these posts were being published, so it cannot know whether Facebook accepted them.
+                They are never retried automatically. Open each group on Facebook and confirm what happened.
+                @if (_campaign.CanStop)
+                {
+                    <strong>Stop the campaign before verifying.</strong>
+                }
+            </p>
+            <div class="table-wrap">
+                <table class="table table-app">
+                    <thead><tr><th>Group</th><th>Batch</th><th class="text-end">Was it published?</th></tr></thead>
+                    <tbody>
+                        @foreach (var t in unknown)
+                        {
+                            <tr>
+                                <td>
+                                    <div class="fw-semibold">@t.GroupName</div>
+                                    <div class="url-cell"><a href="@t.GroupUrl" target="_blank" rel="noopener">Open group on Facebook <i class="bi bi-box-arrow-up-right"></i></a></div>
+                                </td>
+                                <td>@(t.BatchNumber?.ToString() ?? "—")</td>
+                                <td class="text-end text-nowrap">
+                                    <button class="btn btn-sm btn-success" disabled="@(Busy || _campaign.CanStop)" @onclick="() => ResolveAsync(t, true)">
+                                        <i class="bi bi-check-lg"></i> Yes, it was published
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-secondary" disabled="@(Busy || _campaign.CanStop)" @onclick="() => ResolveAsync(t, false)">
+                                        <i class="bi bi-arrow-counterclockwise"></i> No — return to Pending
+                                    </button>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
             </div>
         </div>
     }
@@ -88,7 +146,11 @@ else
     @* ---------- Live "now" panel ---------- *@
     <div class="now-panel @NowCss">
         <div class="now-icon">
-            @if (_campaign.Status == CampaignStatus.Running)
+            @if (running && delayLeft is not null)
+            {
+                <i class="bi bi-hourglass-split"></i>
+            }
+            else if (running)
             {
                 <i class="bi bi-arrow-repeat spin"></i>
             }
@@ -107,95 +169,133 @@ else
         </div>
         <div class="flex-grow-1 min-w-0">
             <div class="now-title">
-                @switch (_campaign.Status)
+                @if (running && delayLeft is { } wait)
                 {
-                    case CampaignStatus.Queued:
-                        <span>Queued — waiting for the worker to start this campaign…</span>
-                        break;
-                    case CampaignStatus.Running when _countdownUntil is { } until && until > DateTime.UtcNow:
-                        <span>Next group in <strong>@Countdown(until)</strong></span>
-                        break;
-                    case CampaignStatus.Running when current is not null:
-                        <span>Group @(current.Order + 1) of @counts.Total: <strong>@current.GroupName</strong></span>
-                        break;
-                    case CampaignStatus.Running:
-                        <span>Running…</span>
-                        break;
-                    default:
-                        <span>@_campaign.Status.ToDisplay()</span>
-                        break;
+                    <span><span class="delay-chip delay-@batch.CurrentDelayKind.ToString().ToLowerInvariant()">@DurationText.Describe(batch.CurrentDelayKind)</span>
+                        <strong class="ms-1">@Countdown(wait)</strong> remaining of @DurationText.Format(TimeSpan.FromSeconds(batch.CurrentDelaySeconds))</span>
+                }
+                else if (running && current is not null)
+                {
+                    <span>Batch @batch.CurrentBatchNumber · group @(batch.CurrentBatchProcessed + 1) of @batch.CurrentBatchSize: <strong>@current.GroupName</strong></span>
+                }
+                else if (_campaign.Status == CampaignStatus.Queued)
+                {
+                    <span>Queued — starting shortly…</span>
+                }
+                else
+                {
+                    <span>@_campaign.Status.ToDisplay()</span>
                 }
             </div>
-            @if (latest is not null)
+            <div class="now-step"><span class="text-muted">Next:</span> @NextAction(current)</div>
+            @if (latest is not null && running)
             {
                 <div class="now-step"><span class="text-muted">@Fmt.Clock(latest.CreatedAtUtc)</span> · @latest.Text</div>
             }
         </div>
-        @if (_campaign.Status == CampaignStatus.Running)
+        @if (running)
         {
             <span class="live-pill"><span class="live-dot-sm"></span> LIVE</span>
         }
     </div>
 
-    <div class="card-panel">
-        <div class="d-flex flex-wrap justify-content-between gap-3 mb-3">
-            <div>
-                <div class="d-flex align-items-center gap-2">
-                    <span class="fs-5 fw-semibold">@_campaign.Name</span>
-                    <StatusBadge Value="_campaign.Status" />
+    <div class="row g-3">
+        <div class="col-xl-7">
+            <div class="card-panel h-100">
+                <div class="d-flex flex-wrap justify-content-between gap-3 mb-3">
+                    <div>
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="fs-5 fw-semibold">@_campaign.Name</span>
+                            <StatusBadge Value="_campaign.Status" />
+                        </div>
+                        <div class="text-muted small">
+                            Content: <strong>@_campaign.ContentTitle</strong> · @(_campaign.RequireApproval ? "Review before posting" : "Fully automatic")
+                        </div>
+                    </div>
+                    <dl class="kv small m-0">
+                        <dt>Started</dt><dd>@Fmt.Time(_campaign.StartedAtUtc)</dd>
+                        <dt>Last activity</dt><dd>@Fmt.Time(batch.LastExecutionAtUtc)</dd>
+                    </dl>
                 </div>
-                <div class="text-muted small">
-                    Content: <strong>@_campaign.ContentTitle</strong> · Delay @_campaign.MinDelaySeconds–@_campaign.MaxDelaySeconds s
-                    · @(_campaign.RequireApproval ? "Review before posting" : "Fully automatic")
+
+                <div class="progress progress-thick mb-3">
+                    <div class="progress-bar bg-success" style="width:@(Pct(counts.Published, counts.Total))%"></div>
+                    <div class="progress-bar bg-warning" style="width:@(Pct(counts.Skipped, counts.Total))%"></div>
+                    <div class="progress-bar bg-danger" style="width:@(Pct(counts.Failed + counts.Inaccessible, counts.Total))%"></div>
+                    <div class="progress-bar unknown-bar" style="width:@(Pct(counts.OutcomeUnknown + counts.Cancelled, counts.Total))%"></div>
                 </div>
-                @if (_campaign.Status is CampaignStatus.Cancelled or CampaignStatus.Completed or CampaignStatus.CompletedWithErrors && !string.IsNullOrEmpty(_campaign.StatusReason))
-                {
-                    <div class="small text-muted">@_campaign.StatusReason</div>
-                }
+
+                <div class="metric-grid">
+                    <div class="metric"><div class="metric-value">@counts.Total</div><div class="metric-label">Total groups</div></div>
+                    <div class="metric text-success"><div class="metric-value">@counts.Published</div><div class="metric-label">Published</div></div>
+                    <div class="metric"><div class="metric-value">@counts.Remaining</div><div class="metric-label">Remaining</div></div>
+                    <div class="metric text-danger"><div class="metric-value">@counts.Failed</div><div class="metric-label">Failed</div></div>
+                    <div class="metric text-warning"><div class="metric-value">@counts.OutcomeUnknown</div><div class="metric-label">Unknown outcome</div></div>
+                    <div class="metric"><div class="metric-value">@counts.Skipped</div><div class="metric-label">Skipped</div></div>
+                    <div class="metric"><div class="metric-value">@counts.Inaccessible</div><div class="metric-label">Inaccessible</div></div>
+                    <div class="metric"><div class="metric-value">@counts.PercentComplete%</div><div class="metric-label">Complete</div></div>
+                </div>
             </div>
-            <dl class="kv small m-0">
-                <dt>Started</dt><dd>@Fmt.Time(_campaign.StartedAtUtc)</dd>
-                <dt>Elapsed</dt><dd>@Fmt.Duration(_campaign.StartedAtUtc, _campaign.CompletedAtUtc)</dd>
-            </dl>
         </div>
 
-        <div class="progress progress-thick mb-2">
-            <div class="progress-bar bg-success" style="width:@(Pct(counts.Published, counts.Total))%"></div>
-            <div class="progress-bar bg-warning" style="width:@(Pct(counts.Skipped, counts.Total))%"></div>
-            <div class="progress-bar bg-danger" style="width:@(Pct(counts.Failed + counts.Inaccessible, counts.Total))%"></div>
-            <div class="progress-bar bg-secondary" style="width:@(Pct(counts.Cancelled, counts.Total))%"></div>
-        </div>
-        <div class="d-flex flex-wrap gap-3 small">
-            <span><strong>@counts.PercentComplete%</strong> complete (@counts.Processed / @counts.Total)</span>
-            <span class="text-success"><i class="bi bi-circle-fill"></i> @counts.Published published</span>
-            <span class="text-warning"><i class="bi bi-circle-fill"></i> @counts.Skipped skipped</span>
-            <span class="text-danger"><i class="bi bi-circle-fill"></i> @counts.Failed failed · @counts.Inaccessible inaccessible</span>
-            @if (counts.Cancelled > 0)
-            {
-                <span class="text-secondary"><i class="bi bi-circle-fill"></i> @counts.Cancelled cancelled</span>
-            }
-            <span class="text-muted"><i class="bi bi-circle"></i> @counts.Remaining remaining</span>
+        <div class="col-xl-5">
+            <div class="card-panel h-100">
+                <h2><i class="bi bi-collection"></i> Batch processing</h2>
+                <dl class="kv batch-kv">
+                    <dt>Current batch</dt>
+                    <dd>@(batch.CurrentBatchNumber == 0 ? "—" : batch.CurrentBatchNumber.ToString()) <span class="text-muted">of ≈ @batch.EstimatedTotalBatches</span></dd>
+                    <dt>Current batch size</dt>
+                    <dd>@(batch.CurrentBatchSize == 0 ? "—" : $"{batch.CurrentBatchSize} groups")</dd>
+                    <dt>Groups completed</dt>
+                    <dd>@(batch.CurrentBatchSize == 0 ? "—" : $"{batch.CurrentBatchProcessed} / {batch.CurrentBatchSize}")</dd>
+                    <dt>Completed batches</dt>
+                    <dd>@batch.CompletedBatches</dd>
+                    <dt>Remaining groups</dt>
+                    <dd>@counts.Remaining</dd>
+                    <dt>Extended break</dt>
+                    <dd>after @_campaign.Pacing.ExtendedDelayAfterBatches batches <span class="text-muted">(@batch.BatchesSinceExtendedDelay done since last)</span></dd>
+                    <dt>Current delay</dt>
+                    <dd>
+                        @if (batch.CurrentDelayKind == DelayKind.None)
+                        {
+                            <span class="text-muted">none</span>
+                        }
+                        else
+                        {
+                            <span class="delay-chip delay-@batch.CurrentDelayKind.ToString().ToLowerInvariant()">@DurationText.Describe(batch.CurrentDelayKind)</span>
+                        }
+                    </dd>
+                    <dt>Selected delay</dt>
+                    <dd>@(batch.CurrentDelayKind == DelayKind.None ? "—" : DurationText.Format(TimeSpan.FromSeconds(batch.CurrentDelaySeconds)))</dd>
+                    <dt>Remaining delay</dt>
+                    <dd>@(delayLeft is { } r ? Countdown(r) + (running ? string.Empty : " (paused — waited on resume)") : "—")</dd>
+                    <dt>Next action</dt>
+                    <dd>@NextAction(current)</dd>
+                </dl>
+                <div class="form-text"><i class="bi bi-sliders"></i> @DurationText.Summary(_campaign.Pacing)</div>
+            </div>
         </div>
     </div>
 
-    <div class="row g-3">
+    <div class="row g-3 mt-0">
         <div class="col-xxl-7">
             <div class="card-panel">
                 <h2><i class="bi bi-list-check"></i> Groups</h2>
                 <div class="table-wrap">
                     <table class="table table-app">
                         <thead>
-                            <tr><th>#</th><th>Group</th><th>Membership</th><th>Status</th><th>Published</th><th>Details</th></tr>
+                            <tr><th>#</th><th>Group</th><th>Batch</th><th>Membership</th><th>Status</th><th>Published</th><th>Details</th></tr>
                         </thead>
                         <tbody>
                             @foreach (var t in _campaign.Targets)
                             {
-                                <tr class="@(t.Status is TargetStatus.CheckingMembership or TargetStatus.Eligible or TargetStatus.Publishing or TargetStatus.AwaitingApproval ? "row-highlight" : "")">
+                                <tr class="@(t.Status is TargetStatus.CheckingMembership or TargetStatus.Eligible or TargetStatus.Publishing or TargetStatus.AwaitingApproval or TargetStatus.OutcomeUnknown ? "row-highlight" : "")">
                                     <td class="text-muted">@(t.Order + 1)</td>
                                     <td>
                                         <div class="fw-semibold">@t.GroupName</div>
                                         <div class="url-cell"><a href="@t.GroupUrl" target="_blank" rel="noopener">@t.GroupUrl</a></div>
                                     </td>
+                                    <td class="text-muted">@(t.BatchNumber?.ToString() ?? "—")</td>
                                     <td><StatusBadge Value="t.MembershipStatus" /></td>
                                     <td><StatusBadge Value="t.Status" /></td>
                                     <td class="text-nowrap small">@Fmt.Time(t.PublishedAtUtc)</td>
@@ -221,7 +321,7 @@ else
                 {
                     <div class="empty-state py-4">
                         <i class="bi bi-terminal"></i>
-                        @((_campaign.Status is CampaignStatus.Queued or CampaignStatus.Running)
+                        @(_campaign.Status is CampaignStatus.Queued or CampaignStatus.Running
                             ? "Activity will appear here as the campaign runs."
                             : "No live activity recorded for this campaign since the application started. Per-group results are in the table.")
                     </div>
@@ -259,7 +359,6 @@ else
 
     private CampaignProgressDto? _campaign;
     private List<CampaignMessage> _activity = [];
-    private DateTime? _countdownUntil;
     private DateTime? _approvalDeadline;
     private bool _showSteps = true;
     private bool _loading = true;
@@ -269,12 +368,18 @@ else
     private IEnumerable<CampaignMessage> VisibleActivity => Enumerable.Reverse(_activity)
         .Where(m => _showSteps || m.Level != CampaignMessageLevel.Step);
 
+    /// <summary>Time left in the current (or interrupted) delay, from the end time persisted in the database.</summary>
+    private TimeSpan? DelayRemaining =>
+        _campaign?.Batch is { CurrentDelayKind: not DelayKind.None, CurrentDelayEndsAtUtc: { } end } && end > DateTime.UtcNow
+            ? end - DateTime.UtcNow
+            : null;
+
     private string NowCss => _campaign?.Status switch
     {
         CampaignStatus.Running => "now-running",
         CampaignStatus.Completed => "now-success",
-        CampaignStatus.CompletedWithErrors => "now-warning",
-        CampaignStatus.Halted => "now-danger",
+        CampaignStatus.CompletedWithErrors or CampaignStatus.Stopped => "now-warning",
+        CampaignStatus.Halted or CampaignStatus.Interrupted => "now-danger",
         _ => "now-neutral"
     };
 
@@ -283,7 +388,7 @@ else
         Broker.CampaignChanged += OnCampaignChanged;
         Broker.TargetChanged += OnTargetChanged;
         Broker.MessageReceived += OnMessage;
-        // Drives the countdown displays.
+        // Drives the countdowns (delay, review timeout) once per second.
         _ticker = new Timer(_ => InvokeAsync(StateHasChanged), null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
     }
 
@@ -292,6 +397,8 @@ else
         _loading = true;
         await RunAsync(async () =>
         {
+            // Opening the monitor is the manual trigger for recovering campaigns interrupted by an application stop.
+            await CampaignService.ReconcileOrphanedCampaignsAsync();
             var id = Id ?? await CampaignService.GetMostRecentActiveOrLatestIdAsync();
             _campaign = id is null ? null : await CampaignService.GetProgressAsync(id.Value);
             if (Id is not null && _campaign is null)
@@ -300,7 +407,6 @@ else
             }
         });
         _activity = _campaign is null ? [] : ActivityLog.Get(_campaign.Id).ToList();
-        _countdownUntil = _activity.LastOrDefault(m => m.Level == CampaignMessageLevel.Info && m.UntilUtc is not null)?.UntilUtc;
         _approvalDeadline = _activity.LastOrDefault(m => m.Level == CampaignMessageLevel.ActionRequired && m.TargetId is not null)?.UntilUtc;
         _loading = false;
     }
@@ -345,18 +451,77 @@ else
         {
             _activity.RemoveRange(0, _activity.Count - MaxActivity);
         }
-
         if (message.Level == CampaignMessageLevel.ActionRequired && message.TargetId is not null)
         {
             _approvalDeadline = message.UntilUtc;
         }
-        else if (message.Level == CampaignMessageLevel.Info)
-        {
-            // A new pacing countdown, or any other campaign info that ends the previous one.
-            _countdownUntil = message.UntilUtc;
-        }
         StateHasChanged();
     });
+
+    private string NextAction(TargetProgressDto? current)
+    {
+        if (_campaign is null)
+        {
+            return "—";
+        }
+        var b = _campaign.Batch;
+        return _campaign.Status switch
+        {
+            CampaignStatus.Queued => "Start processing the remaining Pending groups",
+            CampaignStatus.Running when b.CurrentDelayKind == DelayKind.BetweenPosts =>
+                $"Process next group of batch {b.CurrentBatchNumber} ({b.CurrentBatchProcessed + 1} of {b.CurrentBatchSize})",
+            CampaignStatus.Running when b.CurrentDelayKind is DelayKind.BetweenBatches or DelayKind.Extended =>
+                $"Start batch {b.CurrentBatchNumber} ({b.CurrentBatchSize} groups)",
+            CampaignStatus.Running when current is not null => $"Finish processing {current.GroupName}",
+            CampaignStatus.Running => "Pick the next Pending group",
+            CampaignStatus.NotStarted => "Press Start campaign",
+            _ when _campaign.CanResume => $"Press Resume to continue with {_campaign.Counts.Remaining} Pending group(s)",
+            _ when _campaign.Counts.OutcomeUnknown > 0 => "Verify the groups with an unknown outcome",
+            _ => "Nothing — all groups have been processed"
+        };
+    }
+
+    private async Task StartAsync()
+    {
+        if (_campaign is null)
+        {
+            return;
+        }
+        await RunAsync(() => CampaignService.StartAsync(_campaign.Id), "Campaign started.");
+    }
+
+    private async Task StopAsync()
+    {
+        if (_campaign is null || !await JS.InvokeAsync<bool>("confirm",
+                "Stop this campaign? Published groups stay published, the remaining groups stay Pending, and you can Resume later."))
+        {
+            return;
+        }
+        await RunAsync(() => CampaignService.StopAsync(_campaign.Id), "Stop requested. The campaign stops after saving the current step.");
+    }
+
+    private async Task ResumeAsync()
+    {
+        if (_campaign is null)
+        {
+            return;
+        }
+        await RunAsync(() => CampaignService.ResumeAsync(_campaign.Id),
+            $"Campaign resumed with {_campaign.Counts.Remaining} remaining group(s).");
+    }
+
+    private async Task ResolveAsync(TargetProgressDto target, bool wasPublished)
+    {
+        var question = wasPublished
+            ? $"Confirm that the post IS visible in \"{target.GroupName}\"? The group will be marked Published and never posted to again."
+            : $"Confirm that the post is NOT in \"{target.GroupName}\"? The group returns to Pending and is posted to on the next Resume.";
+        if (!await JS.InvokeAsync<bool>("confirm", question))
+        {
+            return;
+        }
+        await RunAsync(() => CampaignService.ResolveUnknownOutcomeAsync(target.Id, wasPublished),
+            wasPublished ? $"\"{target.GroupName}\" marked as published." : $"\"{target.GroupName}\" returned to Pending.");
+    }
 
     private async Task DecideAsync(Guid targetId, bool approve)
     {
@@ -370,24 +535,6 @@ else
         });
     }
 
-    private async Task CancelAsync()
-    {
-        if (_campaign is null || !await JS.InvokeAsync<bool>("confirm", "Cancel this campaign? Groups not yet processed will be skipped."))
-        {
-            return;
-        }
-        await RunAsync(() => CampaignService.CancelAsync(_campaign.Id), "Cancellation requested.");
-    }
-
-    private async Task ResumeAsync()
-    {
-        if (_campaign is null)
-        {
-            return;
-        }
-        await RunAsync(() => CampaignService.ResumeAsync(_campaign.Id), "Campaign resumed.");
-    }
-
     private static string LevelIcon(CampaignMessageLevel level) => level switch
     {
         CampaignMessageLevel.Step => "bi-dot",
@@ -398,14 +545,15 @@ else
         _ => "bi-info-circle-fill"
     };
 
-    private static string Countdown(DateTime untilUtc)
+    private static string Countdown(TimeSpan remaining)
     {
-        var remaining = untilUtc - DateTime.UtcNow;
         if (remaining < TimeSpan.Zero)
         {
             remaining = TimeSpan.Zero;
         }
-        return remaining.TotalMinutes >= 1 ? $"{(int)remaining.TotalMinutes}m {remaining.Seconds:00}s" : $"{remaining.Seconds}s";
+        return remaining.TotalHours >= 1
+            ? $"{(int)remaining.TotalHours}h {remaining.Minutes:00}m {remaining.Seconds:00}s"
+            : remaining.TotalMinutes >= 1 ? $"{(int)remaining.TotalMinutes}m {remaining.Seconds:00}s" : $"{remaining.Seconds}s";
     }
 
     private static int Pct(int value, int total) => total == 0 ? 0 : value * 100 / total;

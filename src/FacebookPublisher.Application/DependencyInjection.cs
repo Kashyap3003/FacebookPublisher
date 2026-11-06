@@ -15,6 +15,7 @@ public static class DependencyInjection
         services.AddScoped<ContentService>();
         services.AddScoped<CampaignService>();
         services.AddScoped<CampaignRunner>();
+        services.AddSingleton<IBatchDelayService, BatchDelayService>();
         services.AddScoped<ReportService>();
         services.AddScoped<SettingsService>();
         services.AddScoped<BrowserSessionService>();

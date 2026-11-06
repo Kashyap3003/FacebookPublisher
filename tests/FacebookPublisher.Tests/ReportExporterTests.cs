@@ -18,7 +18,7 @@ public class ReportExporterTests
             new(Guid.NewGuid(), Guid.NewGuid(), "=HYPERLINK(\"x\")", "https://www.facebook.com/groups/evil", 1,
                 MembershipStatus.NotMember, TargetStatus.SkippedNotMember, null, "Not a member", DateTime.UtcNow)
         };
-        return new CampaignReportDto(Guid.NewGuid(), "Launch", "Announcement", CampaignStatus.Completed, null, true, 10, 20,
+        return new CampaignReportDto(Guid.NewGuid(), "Launch", "Announcement", CampaignStatus.Completed, null, true, new FacebookPublisher.Domain.Entities.BatchPacingConfig(), 3,
             DateTime.UtcNow, DateTime.UtcNow, DateTime.UtcNow,
             CampaignCountsDto.From(targets.Select(t => t.Status)),
             [new ReasonCountDto("Skipped (Not a Member)", "Not a member", 1)],
@@ -34,6 +34,9 @@ public class ReportExporterTests
         Assert.Contains("\"'=HYPERLINK(\"\"x\"\")\"", csv);
         Assert.Contains("Total Groups Provided,2", csv);
         Assert.Contains("Published Successfully,1", csv);
+        Assert.Contains("Batch Size,5–9 groups", csv);
+        Assert.Contains("Delay Between Batches,15–30 minutes", csv);
+        Assert.Contains("Completed Batches,3", csv);
     }
 
     [Fact]

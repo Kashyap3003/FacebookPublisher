@@ -18,6 +18,7 @@ public static class DisplayExtensions
         TargetStatus.Failed => "Failed",
         TargetStatus.Inaccessible => "Inaccessible",
         TargetStatus.Cancelled => "Cancelled",
+        TargetStatus.OutcomeUnknown => "Outcome Unknown",
         _ => status.ToString()
     };
 
@@ -32,7 +33,9 @@ public static class DisplayExtensions
 
     public static string ToDisplay(this CampaignStatus status) => status switch
     {
+        CampaignStatus.NotStarted => "Not Started",
         CampaignStatus.CompletedWithErrors => "Completed with Errors",
+        CampaignStatus.Halted => "Halted (action required)",
         _ => status.ToString()
     };
 

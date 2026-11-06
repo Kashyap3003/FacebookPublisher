@@ -1,4 +1,5 @@
 using FacebookPublisher.Domain.Entities;
+using FacebookPublisher.Domain.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 
@@ -55,6 +56,11 @@ internal sealed class CampaignConfiguration : IEntityTypeConfiguration<Campaign>
         builder.Property(c => c.RowVersion).IsRowVersion();
         builder.Ignore(c => c.IsActive);
         builder.Ignore(c => c.CanBeResumed);
+        builder.Ignore(c => c.CanBeStarted);
+        builder.Ignore(c => c.CanBeStopped);
+        // Configuration snapshot stored with the campaign (audit + consistent execution).
+        builder.OwnsOne(c => c.Pacing, PacingMapping.Configure);
+        builder.Navigation(c => c.Pacing).IsRequired();
         builder.HasIndex(c => c.Status);
         builder.HasIndex(c => c.CreatedAtUtc);
         builder.HasOne(c => c.ContentPost)
@@ -83,6 +89,7 @@ internal sealed class CampaignTargetConfiguration : IEntityTypeConfiguration<Cam
         builder.HasIndex(t => new { t.CampaignId, t.FacebookGroupId }).IsUnique();
         builder.HasIndex(t => new { t.GroupUrl, t.Status, t.PublishedAtUtc });
         builder.HasIndex(t => t.UpdatedAtUtc);
+        builder.HasIndex(t => new { t.CampaignId, t.Status });
 
         builder.HasOne(t => t.FacebookGroup)
             .WithMany(g => g.CampaignTargets)
@@ -99,5 +106,40 @@ internal sealed class PublisherSettingsConfiguration : IEntityTypeConfiguration<
         builder.Property(s => s.Id).ValueGeneratedNever();
         builder.Property(s => s.BrowserProfilePath).HasMaxLength(500).IsRequired();
         builder.Property(s => s.BrowserChannel).HasMaxLength(40);
+        builder.OwnsOne(s => s.Pacing, PacingMapping.Configure);
+        builder.Navigation(s => s.Pacing).IsRequired();
+    }
+}
+
+/// <summary>
+/// Maps <see cref="BatchPacingConfig"/> as owned columns (Pacing_MinBatchSize, Pacing_PostDelay_Min, …) on both the
+/// settings row and each campaign, so there is one model for defaults and snapshots and no extra tables.
+/// </summary>
+internal static class PacingMapping
+{
+    public static void Configure<TOwner>(OwnedNavigationBuilder<TOwner, BatchPacingConfig> pacing) where TOwner : class
+    {
+        pacing.Property(p => p.MinBatchSize).HasDefaultValue(5);
+        pacing.Property(p => p.MaxBatchSize).HasDefaultValue(9);
+        pacing.Property(p => p.ExtendedDelayAfterBatches).HasDefaultValue(5);
+        ConfigureRange(pacing, p => p.PostDelay, 10, 30, DelayUnit.Seconds);
+        ConfigureRange(pacing, p => p.BatchDelay, 15, 30, DelayUnit.Minutes);
+        ConfigureRange(pacing, p => p.ExtendedDelay, 3, 5, DelayUnit.Hours);
+    }
+
+    private static void ConfigureRange<TOwner>(
+        OwnedNavigationBuilder<TOwner, BatchPacingConfig> pacing,
+        System.Linq.Expressions.Expression<Func<BatchPacingConfig, DelayRange?>> navigation,
+        int min,
+        int max,
+        DelayUnit unit) where TOwner : class
+    {
+        pacing.OwnsOne(navigation, range =>
+        {
+            range.Property(r => r.Min).HasDefaultValue(min);
+            range.Property(r => r.Max).HasDefaultValue(max);
+            range.Property(r => r.Unit).HasDefaultValue(unit);
+        });
+        pacing.Navigation(navigation).IsRequired();
     }
 }

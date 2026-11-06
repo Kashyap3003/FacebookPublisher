@@ -28,8 +28,14 @@ namespace FacebookPublisher.Infrastructure.Persistence.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<int>("BatchesSinceExtendedDelay")
+                        .HasColumnType("int");
+
                     b.Property<DateTime?>("CompletedAtUtc")
                         .HasColumnType("datetime2");
+
+                    b.Property<int>("CompletedBatches")
+                        .HasColumnType("int");
 
                     b.Property<Guid>("ContentPostId")
                         .HasColumnType("uniqueidentifier");
@@ -37,16 +43,42 @@ namespace FacebookPublisher.Infrastructure.Persistence.Migrations
                     b.Property<DateTime>("CreatedAtUtc")
                         .HasColumnType("datetime2");
 
-                    b.Property<int>("MaxDelaySeconds")
+                    b.Property<int>("CurrentBatchNumber")
                         .HasColumnType("int");
 
-                    b.Property<int>("MinDelaySeconds")
+                    b.Property<int>("CurrentBatchProcessed")
                         .HasColumnType("int");
+
+                    b.Property<int>("CurrentBatchSize")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime?>("CurrentDelayEndsAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("CurrentDelayKind")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("nvarchar(40)");
+
+                    b.Property<int>("CurrentDelaySeconds")
+                        .HasColumnType("int");
+
+                    b.Property<Guid?>("ExecutionOwnerId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime?>("LastExecutionAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid?>("LastProcessedTargetId")
+                        .HasColumnType("uniqueidentifier");
 
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(200)
                         .HasColumnType("nvarchar(200)");
+
+                    b.Property<int>("RemainingGroupCount")
+                        .HasColumnType("int");
 
                     b.Property<bool>("RequireApproval")
                         .HasColumnType("bit");
@@ -88,6 +120,9 @@ namespace FacebookPublisher.Infrastructure.Persistence.Migrations
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uniqueidentifier");
+
+                    b.Property<int?>("BatchNumber")
+                        .HasColumnType("int");
 
                     b.Property<Guid>("CampaignId")
                         .HasColumnType("uniqueidentifier");
@@ -143,6 +178,8 @@ namespace FacebookPublisher.Infrastructure.Persistence.Migrations
                     b.HasIndex("CampaignId", "FacebookGroupId")
                         .IsUnique()
                         .HasFilter("[FacebookGroupId] IS NOT NULL");
+
+                    b.HasIndex("CampaignId", "Status");
 
                     b.HasIndex("GroupUrl", "Status", "PublishedAtUtc");
 
@@ -300,12 +337,6 @@ namespace FacebookPublisher.Infrastructure.Persistence.Migrations
                         .HasMaxLength(500)
                         .HasColumnType("nvarchar(500)");
 
-                    b.Property<int>("DefaultMaxDelaySeconds")
-                        .HasColumnType("int");
-
-                    b.Property<int>("DefaultMinDelaySeconds")
-                        .HasColumnType("int");
-
                     b.Property<int>("DuplicateWindowHours")
                         .HasColumnType("int");
 
@@ -346,7 +377,137 @@ namespace FacebookPublisher.Infrastructure.Persistence.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
+                    b.OwnsOne("FacebookPublisher.Domain.Entities.BatchPacingConfig", "Pacing", b1 =>
+                        {
+                            b1.Property<Guid>("CampaignId")
+                                .HasColumnType("uniqueidentifier");
+
+                            b1.Property<int>("ExtendedDelayAfterBatches")
+                                .ValueGeneratedOnAdd()
+                                .HasColumnType("int")
+                                .HasDefaultValue(5);
+
+                            b1.Property<int>("MaxBatchSize")
+                                .ValueGeneratedOnAdd()
+                                .HasColumnType("int")
+                                .HasDefaultValue(9);
+
+                            b1.Property<int>("MinBatchSize")
+                                .ValueGeneratedOnAdd()
+                                .HasColumnType("int")
+                                .HasDefaultValue(5);
+
+                            b1.HasKey("CampaignId");
+
+                            b1.ToTable("Campaigns");
+
+                            b1.WithOwner()
+                                .HasForeignKey("CampaignId");
+
+                            b1.OwnsOne("FacebookPublisher.Domain.Entities.DelayRange", "BatchDelay", b2 =>
+                                {
+                                    b2.Property<Guid>("BatchPacingConfigCampaignId")
+                                        .HasColumnType("uniqueidentifier");
+
+                                    b2.Property<int>("Max")
+                                        .ValueGeneratedOnAdd()
+                                        .HasColumnType("int")
+                                        .HasDefaultValue(30);
+
+                                    b2.Property<int>("Min")
+                                        .ValueGeneratedOnAdd()
+                                        .HasColumnType("int")
+                                        .HasDefaultValue(15);
+
+                                    b2.Property<string>("Unit")
+                                        .IsRequired()
+                                        .ValueGeneratedOnAdd()
+                                        .HasMaxLength(40)
+                                        .HasColumnType("nvarchar(40)")
+                                        .HasDefaultValue("Minutes");
+
+                                    b2.HasKey("BatchPacingConfigCampaignId");
+
+                                    b2.ToTable("Campaigns");
+
+                                    b2.WithOwner()
+                                        .HasForeignKey("BatchPacingConfigCampaignId");
+                                });
+
+                            b1.OwnsOne("FacebookPublisher.Domain.Entities.DelayRange", "ExtendedDelay", b2 =>
+                                {
+                                    b2.Property<Guid>("BatchPacingConfigCampaignId")
+                                        .HasColumnType("uniqueidentifier");
+
+                                    b2.Property<int>("Max")
+                                        .ValueGeneratedOnAdd()
+                                        .HasColumnType("int")
+                                        .HasDefaultValue(5);
+
+                                    b2.Property<int>("Min")
+                                        .ValueGeneratedOnAdd()
+                                        .HasColumnType("int")
+                                        .HasDefaultValue(3);
+
+                                    b2.Property<string>("Unit")
+                                        .IsRequired()
+                                        .ValueGeneratedOnAdd()
+                                        .HasMaxLength(40)
+                                        .HasColumnType("nvarchar(40)")
+                                        .HasDefaultValue("Hours");
+
+                                    b2.HasKey("BatchPacingConfigCampaignId");
+
+                                    b2.ToTable("Campaigns");
+
+                                    b2.WithOwner()
+                                        .HasForeignKey("BatchPacingConfigCampaignId");
+                                });
+
+                            b1.OwnsOne("FacebookPublisher.Domain.Entities.DelayRange", "PostDelay", b2 =>
+                                {
+                                    b2.Property<Guid>("BatchPacingConfigCampaignId")
+                                        .HasColumnType("uniqueidentifier");
+
+                                    b2.Property<int>("Max")
+                                        .ValueGeneratedOnAdd()
+                                        .HasColumnType("int")
+                                        .HasDefaultValue(30);
+
+                                    b2.Property<int>("Min")
+                                        .ValueGeneratedOnAdd()
+                                        .HasColumnType("int")
+                                        .HasDefaultValue(10);
+
+                                    b2.Property<string>("Unit")
+                                        .IsRequired()
+                                        .ValueGeneratedOnAdd()
+                                        .HasMaxLength(40)
+                                        .HasColumnType("nvarchar(40)")
+                                        .HasDefaultValue("Seconds");
+
+                                    b2.HasKey("BatchPacingConfigCampaignId");
+
+                                    b2.ToTable("Campaigns");
+
+                                    b2.WithOwner()
+                                        .HasForeignKey("BatchPacingConfigCampaignId");
+                                });
+
+                            b1.Navigation("BatchDelay")
+                                .IsRequired();
+
+                            b1.Navigation("ExtendedDelay")
+                                .IsRequired();
+
+                            b1.Navigation("PostDelay")
+                                .IsRequired();
+                        });
+
                     b.Navigation("ContentPost");
+
+                    b.Navigation("Pacing")
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("FacebookPublisher.Domain.Entities.CampaignTarget", b =>
@@ -376,6 +537,139 @@ namespace FacebookPublisher.Infrastructure.Persistence.Migrations
                         .IsRequired();
 
                     b.Navigation("ContentPost");
+                });
+
+            modelBuilder.Entity("FacebookPublisher.Domain.Entities.PublisherSettings", b =>
+                {
+                    b.OwnsOne("FacebookPublisher.Domain.Entities.BatchPacingConfig", "Pacing", b1 =>
+                        {
+                            b1.Property<int>("PublisherSettingsId")
+                                .HasColumnType("int");
+
+                            b1.Property<int>("ExtendedDelayAfterBatches")
+                                .ValueGeneratedOnAdd()
+                                .HasColumnType("int")
+                                .HasDefaultValue(5);
+
+                            b1.Property<int>("MaxBatchSize")
+                                .ValueGeneratedOnAdd()
+                                .HasColumnType("int")
+                                .HasDefaultValue(9);
+
+                            b1.Property<int>("MinBatchSize")
+                                .ValueGeneratedOnAdd()
+                                .HasColumnType("int")
+                                .HasDefaultValue(5);
+
+                            b1.HasKey("PublisherSettingsId");
+
+                            b1.ToTable("PublisherSettings");
+
+                            b1.WithOwner()
+                                .HasForeignKey("PublisherSettingsId");
+
+                            b1.OwnsOne("FacebookPublisher.Domain.Entities.DelayRange", "BatchDelay", b2 =>
+                                {
+                                    b2.Property<int>("BatchPacingConfigPublisherSettingsId")
+                                        .HasColumnType("int");
+
+                                    b2.Property<int>("Max")
+                                        .ValueGeneratedOnAdd()
+                                        .HasColumnType("int")
+                                        .HasDefaultValue(30);
+
+                                    b2.Property<int>("Min")
+                                        .ValueGeneratedOnAdd()
+                                        .HasColumnType("int")
+                                        .HasDefaultValue(15);
+
+                                    b2.Property<string>("Unit")
+                                        .IsRequired()
+                                        .ValueGeneratedOnAdd()
+                                        .HasMaxLength(40)
+                                        .HasColumnType("nvarchar(40)")
+                                        .HasDefaultValue("Minutes");
+
+                                    b2.HasKey("BatchPacingConfigPublisherSettingsId");
+
+                                    b2.ToTable("PublisherSettings");
+
+                                    b2.WithOwner()
+                                        .HasForeignKey("BatchPacingConfigPublisherSettingsId");
+                                });
+
+                            b1.OwnsOne("FacebookPublisher.Domain.Entities.DelayRange", "ExtendedDelay", b2 =>
+                                {
+                                    b2.Property<int>("BatchPacingConfigPublisherSettingsId")
+                                        .HasColumnType("int");
+
+                                    b2.Property<int>("Max")
+                                        .ValueGeneratedOnAdd()
+                                        .HasColumnType("int")
+                                        .HasDefaultValue(5);
+
+                                    b2.Property<int>("Min")
+                                        .ValueGeneratedOnAdd()
+                                        .HasColumnType("int")
+                                        .HasDefaultValue(3);
+
+                                    b2.Property<string>("Unit")
+                                        .IsRequired()
+                                        .ValueGeneratedOnAdd()
+                                        .HasMaxLength(40)
+                                        .HasColumnType("nvarchar(40)")
+                                        .HasDefaultValue("Hours");
+
+                                    b2.HasKey("BatchPacingConfigPublisherSettingsId");
+
+                                    b2.ToTable("PublisherSettings");
+
+                                    b2.WithOwner()
+                                        .HasForeignKey("BatchPacingConfigPublisherSettingsId");
+                                });
+
+                            b1.OwnsOne("FacebookPublisher.Domain.Entities.DelayRange", "PostDelay", b2 =>
+                                {
+                                    b2.Property<int>("BatchPacingConfigPublisherSettingsId")
+                                        .HasColumnType("int");
+
+                                    b2.Property<int>("Max")
+                                        .ValueGeneratedOnAdd()
+                                        .HasColumnType("int")
+                                        .HasDefaultValue(30);
+
+                                    b2.Property<int>("Min")
+                                        .ValueGeneratedOnAdd()
+                                        .HasColumnType("int")
+                                        .HasDefaultValue(10);
+
+                                    b2.Property<string>("Unit")
+                                        .IsRequired()
+                                        .ValueGeneratedOnAdd()
+                                        .HasMaxLength(40)
+                                        .HasColumnType("nvarchar(40)")
+                                        .HasDefaultValue("Seconds");
+
+                                    b2.HasKey("BatchPacingConfigPublisherSettingsId");
+
+                                    b2.ToTable("PublisherSettings");
+
+                                    b2.WithOwner()
+                                        .HasForeignKey("BatchPacingConfigPublisherSettingsId");
+                                });
+
+                            b1.Navigation("BatchDelay")
+                                .IsRequired();
+
+                            b1.Navigation("ExtendedDelay")
+                                .IsRequired();
+
+                            b1.Navigation("PostDelay")
+                                .IsRequired();
+                        });
+
+                    b.Navigation("Pacing")
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("FacebookPublisher.Domain.Entities.Campaign", b =>

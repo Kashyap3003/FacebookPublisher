@@ -25,7 +25,7 @@
                 TargetStatus.Pending => "s-neutral",
                 TargetStatus.CheckingMembership or TargetStatus.Publishing => Spin("s-progress"),
                 TargetStatus.Eligible => "s-info",
-                TargetStatus.AwaitingApproval => "s-action",
+                TargetStatus.AwaitingApproval or TargetStatus.OutcomeUnknown => "s-action",
                 TargetStatus.Published => "s-success",
                 TargetStatus.SkippedNotMember or TargetStatus.SkippedDuplicate or TargetStatus.SkippedByUser => "s-warning",
                 TargetStatus.Failed or TargetStatus.Inaccessible => "s-danger",
@@ -37,7 +37,8 @@
                 CampaignStatus.Running => Spin("s-progress"),
                 CampaignStatus.Completed => "s-success",
                 CampaignStatus.CompletedWithErrors => "s-warning",
-                CampaignStatus.Halted => "s-danger",
+                CampaignStatus.Halted or CampaignStatus.Interrupted => "s-danger",
+                CampaignStatus.Stopped => "s-warning",
                 _ => "s-neutral"
             }),
             MembershipStatus m => (m.ToDisplay(), m switch

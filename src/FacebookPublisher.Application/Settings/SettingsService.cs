@@ -1,5 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 using FacebookPublisher.Application.Abstractions;
+using FacebookPublisher.Application.Campaigns;
 using FacebookPublisher.Application.Common;
 using FacebookPublisher.Domain.Entities;
 using Microsoft.EntityFrameworkCore;
@@ -10,11 +11,8 @@ namespace FacebookPublisher.Application.Settings;
 /// <summary>Editable settings form model.</summary>
 public sealed class SettingsModel
 {
-    [Range(5, 3600, ErrorMessage = "Minimum delay must be between 5 and 3600 seconds.")]
-    public int DefaultMinDelaySeconds { get; set; }
-
-    [Range(5, 3600, ErrorMessage = "Maximum delay must be between 5 and 3600 seconds.")]
-    public int DefaultMaxDelaySeconds { get; set; }
+    /// <summary>Default batch processing and delay settings for new campaigns.</summary>
+    public BatchPacingConfig Pacing { get; set; } = new();
 
     public bool RequireApprovalByDefault { get; set; }
 
@@ -66,8 +64,7 @@ public sealed class SettingsService(IApplicationDbContextFactory dbFactory, ILog
         var s = await GetEntityAsync(ct);
         return new SettingsModel
         {
-            DefaultMinDelaySeconds = s.DefaultMinDelaySeconds,
-            DefaultMaxDelaySeconds = s.DefaultMaxDelaySeconds,
+            Pacing = s.Pacing.Clone(),
             RequireApprovalByDefault = s.RequireApprovalByDefault,
             ApprovalTimeoutMinutes = s.ApprovalTimeoutMinutes,
             MaxGroupsPerCampaign = s.MaxGroupsPerCampaign,
@@ -87,10 +84,7 @@ public sealed class SettingsService(IApplicationDbContextFactory dbFactory, ILog
         var errors = new List<ValidationResult>();
         Validator.TryValidateObject(model, new ValidationContext(model), errors, validateAllProperties: true);
         var messages = errors.Select(e => e.ErrorMessage ?? "Invalid value.").ToList();
-        if (model.DefaultMaxDelaySeconds < model.DefaultMinDelaySeconds)
-        {
-            messages.Add("Maximum delay must be greater than or equal to the minimum delay.");
-        }
+        messages.AddRange(BatchPacingValidator.Validate(model.Pacing).Select(e => e.Message));
         if (SettingsService.BrowserChannels.All(c => c.Value != (model.BrowserChannel ?? string.Empty)))
         {
             messages.Add("Unknown browser channel.");
@@ -108,8 +102,7 @@ public sealed class SettingsService(IApplicationDbContextFactory dbFactory, ILog
             db.Settings.Add(s);
         }
 
-        s.DefaultMinDelaySeconds = model.DefaultMinDelaySeconds;
-        s.DefaultMaxDelaySeconds = model.DefaultMaxDelaySeconds;
+        CopyPacing(model.Pacing, s.Pacing);
         s.RequireApprovalByDefault = model.RequireApprovalByDefault;
         s.ApprovalTimeoutMinutes = model.ApprovalTimeoutMinutes;
         s.MaxGroupsPerCampaign = model.MaxGroupsPerCampaign;
@@ -122,6 +115,23 @@ public sealed class SettingsService(IApplicationDbContextFactory dbFactory, ILog
         s.UpdatedAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
         logger.LogInformation("Settings updated");
+    }
+
+    /// <summary>Copies values into the tracked owned instance (rather than replacing it) so EF updates the columns in place.</summary>
+    private static void CopyPacing(BatchPacingConfig from, BatchPacingConfig to)
+    {
+        to.MinBatchSize = from.MinBatchSize;
+        to.MaxBatchSize = from.MaxBatchSize;
+        to.PostDelay.Min = from.PostDelay.Min;
+        to.PostDelay.Max = from.PostDelay.Max;
+        to.PostDelay.Unit = from.PostDelay.Unit;
+        to.BatchDelay.Min = from.BatchDelay.Min;
+        to.BatchDelay.Max = from.BatchDelay.Max;
+        to.BatchDelay.Unit = from.BatchDelay.Unit;
+        to.ExtendedDelayAfterBatches = from.ExtendedDelayAfterBatches;
+        to.ExtendedDelay.Min = from.ExtendedDelay.Min;
+        to.ExtendedDelay.Max = from.ExtendedDelay.Max;
+        to.ExtendedDelay.Unit = from.ExtendedDelay.Unit;
     }
 
     public async Task RecordSessionCheckAsync(bool isLoggedIn, DateTime checkedAtUtc, CancellationToken ct = default)

@@ -17,14 +17,38 @@ public enum MembershipStatus
 
 public enum CampaignStatus
 {
-    Draft = 0,
+    /// <summary>Created but never started.</summary>
+    NotStarted = 0,
+    /// <summary>The user clicked Start/Resume; waiting for the campaign worker.</summary>
     Queued = 1,
     Running = 2,
     Completed = 3,
     CompletedWithErrors = 4,
     /// <summary>Stopped by the system because Facebook required manual intervention (session expired, checkpoint, restriction).</summary>
     Halted = 5,
-    Cancelled = 6
+    /// <summary>Legacy status from before Stop/Resume; such campaigns can still be resumed.</summary>
+    Cancelled = 6,
+    /// <summary>Stopped by the user; remaining groups stay Pending.</summary>
+    Stopped = 7,
+    /// <summary>The application stopped (shutdown, crash) while the campaign was queued or running.</summary>
+    Interrupted = 8
+}
+
+/// <summary>Units offered by the batch/delay settings. Each delay field allows only a subset (see the validator).</summary>
+public enum DelayUnit
+{
+    Seconds = 0,
+    Minutes = 1,
+    Hours = 2
+}
+
+/// <summary>The kind of wait a campaign is in (or will continue with when resumed).</summary>
+public enum DelayKind
+{
+    None = 0,
+    BetweenPosts = 1,
+    BetweenBatches = 2,
+    Extended = 3
 }
 
 public enum TargetStatus
@@ -40,5 +64,8 @@ public enum TargetStatus
     SkippedByUser = 8,
     Failed = 9,
     Inaccessible = 10,
-    Cancelled = 11
+    /// <summary>Legacy status from before Stop/Resume.</summary>
+    Cancelled = 11,
+    /// <summary>The application stopped while this group was Publishing; Facebook may or may not have accepted the post. Never retried automatically.</summary>
+    OutcomeUnknown = 12
 }

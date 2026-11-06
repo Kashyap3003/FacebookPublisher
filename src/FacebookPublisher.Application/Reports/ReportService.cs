@@ -16,8 +16,8 @@ public sealed record CampaignReportDto(
     CampaignStatus Status,
     string? StatusReason,
     bool RequireApproval,
-    int MinDelaySeconds,
-    int MaxDelaySeconds,
+    BatchPacingConfig Pacing,
+    int CompletedBatches,
     DateTime CreatedAtUtc,
     DateTime? StartedAtUtc,
     DateTime? CompletedAtUtc,
@@ -58,7 +58,7 @@ public sealed class ReportService(IApplicationDbContextFactory dbFactory)
 
         var reasons = campaign.Targets
             .Where(t => t.Status is TargetStatus.SkippedNotMember or TargetStatus.SkippedDuplicate or TargetStatus.SkippedByUser
-                or TargetStatus.Failed or TargetStatus.Inaccessible or TargetStatus.Cancelled)
+                or TargetStatus.Failed or TargetStatus.Inaccessible or TargetStatus.Cancelled or TargetStatus.OutcomeUnknown)
             .GroupBy(t => new { Category = t.Status.ToDisplay(), Reason = t.ErrorMessage ?? "(no details)" })
             .Select(g => new ReasonCountDto(g.Key.Category, g.Key.Reason, g.Count()))
             .OrderBy(r => r.Category)
@@ -72,8 +72,8 @@ public sealed class ReportService(IApplicationDbContextFactory dbFactory)
             campaign.Status,
             campaign.StatusReason,
             campaign.RequireApproval,
-            campaign.MinDelaySeconds,
-            campaign.MaxDelaySeconds,
+            campaign.Pacing.Clone(),
+            campaign.CompletedBatches,
             campaign.CreatedAtUtc,
             campaign.StartedAtUtc,
             campaign.CompletedAtUtc,

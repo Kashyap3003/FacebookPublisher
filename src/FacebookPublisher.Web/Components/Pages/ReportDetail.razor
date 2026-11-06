@@ -51,7 +51,11 @@
                     <dt>Started</dt><dd>@Fmt.Time(_report.StartedAtUtc)</dd>
                     <dt>Completed</dt><dd>@Fmt.Time(_report.CompletedAtUtc)</dd>
                     <dt>Duration</dt><dd>@Fmt.Duration(_report.StartedAtUtc, _report.CompletedAtUtc)</dd>
-                    <dt>Delay</dt><dd>@_report.MinDelaySeconds–@_report.MaxDelaySeconds s</dd>
+                    <dt>Batch size</dt><dd>@_report.Pacing.MinBatchSize–@_report.Pacing.MaxBatchSize groups</dd>
+                    <dt>Between posts</dt><dd>@DurationText.Format(_report.Pacing.PostDelay)</dd>
+                    <dt>Between batches</dt><dd>@DurationText.Format(_report.Pacing.BatchDelay)</dd>
+                    <dt>Extended break</dt><dd>@DurationText.Format(_report.Pacing.ExtendedDelay) after every @_report.Pacing.ExtendedDelayAfterBatches batches</dd>
+                    <dt>Completed batches</dt><dd>@_report.CompletedBatches</dd>
                     <dt>Review</dt><dd>@(_report.RequireApproval ? "Each post reviewed" : "Automatic")</dd>
                 </dl>
             </div>

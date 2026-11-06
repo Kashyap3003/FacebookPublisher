@@ -14,6 +14,12 @@ public interface ICampaignQueue
 /// <summary>Tracks the campaign currently being executed and exposes cooperative cancellation for it.</summary>
 public interface ICampaignExecutionTracker
 {
+    /// <summary>Identifies this application process. Stored on campaigns it owns (database execution lease).</summary>
+    Guid InstanceId { get; }
+
+    /// <summary>When this process started; leases written before it belong to a previous process.</summary>
+    DateTime StartedAtUtc { get; }
+
     Guid? ActiveCampaignId { get; }
 
     /// <summary>Registers the campaign as active and returns a token cancelled by user request or host shutdown.</summary>
@@ -22,6 +28,18 @@ public interface ICampaignExecutionTracker
     bool RequestCancel(Guid campaignId);
 
     void End(Guid campaignId);
+}
+
+/// <summary>Inclusive random integers. Injected so tests can make batch sizes and delays deterministic.</summary>
+public interface IRandomSource
+{
+    int NextInclusive(int minInclusive, int maxInclusive);
+}
+
+/// <summary>Cancellable asynchronous wait (Task.Delay). Injected so tests do not wait for real minutes or hours.</summary>
+public interface IAsyncDelay
+{
+    Task DelayAsync(TimeSpan duration, CancellationToken cancellationToken);
 }
 
 /// <summary>Human-in-the-loop approval for posts prepared in the browser.</summary>

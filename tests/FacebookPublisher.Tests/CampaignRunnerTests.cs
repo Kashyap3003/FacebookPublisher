@@ -17,8 +17,12 @@ public class CampaignRunnerTests
     private readonly CampaignApprovalGate _gate = new();
     private readonly RecordingNotifier _notifier = new();
 
+    private readonly CampaignExecutionTracker _tracker = new();
+
     private CampaignRunner CreateRunner() => new(
-        _db, _automation, new FakeStorage(), _gate, _notifier, NullLogger<CampaignRunner>.Instance);
+        _db, _automation, new FakeStorage(), _gate, _notifier,
+        new BatchDelayService(new SystemRandomSource()), new RecordingDelay(), _tracker,
+        NullLogger<CampaignRunner>.Instance);
 
     [Fact]
     public async Task Automatic_campaign_publishes_without_approval_and_reports_every_step_live()
@@ -33,13 +37,14 @@ public class CampaignRunnerTests
         Assert.Equal(CampaignStatus.Completed, campaign.Status);
 
         var texts = _notifier.Messages.Select(m => m.Text).ToList();
-        Assert.Contains(texts, t => t.StartsWith("Campaign started") && t.Contains("fully automatic"));
+        Assert.Contains(texts, t => t.StartsWith("Campaign started") && t.Contains("fully automatic", StringComparison.OrdinalIgnoreCase));
         Assert.Contains("Facebook session is active.", texts);
-        Assert.Contains(texts, t => t.StartsWith("Group 1 of 2"));
-        Assert.Contains(texts, t => t.StartsWith("Waiting") && t.Contains("before the next group"));
+        Assert.Contains(texts, t => t.StartsWith("Batch 1 started"));
+        Assert.Contains(texts, t => t.StartsWith("Group 1 of 2 (batch 1"));
+        Assert.Contains(texts, t => t.StartsWith("Between posts: waiting"));
         Assert.Contains(_notifier.Messages, m => m.Level == CampaignMessageLevel.Step && m.Text == "Clicking Post…" && m.GroupName == "Group auto-2");
         Assert.Equal(2, _notifier.Messages.Count(m => m.Level == CampaignMessageLevel.Success && m.Text.StartsWith("Published successfully")));
-        Assert.StartsWith("Campaign finished: 2 published", texts[^1]);
+        Assert.StartsWith("Campaign finished after 1 batch(es): 2 published", texts[^1]);
     }
 
     [Fact]
@@ -166,7 +171,7 @@ public class CampaignRunnerTests
     }
 
     [Fact]
-    public async Task User_cancellation_marks_unprocessed_groups_cancelled()
+    public async Task User_stop_leaves_unprocessed_groups_pending_and_resumable()
     {
         var id = await SeedCampaignAsync(["a", "b"]);
         using var cts = new CancellationTokenSource();
@@ -175,8 +180,10 @@ public class CampaignRunnerTests
         await CreateRunner().RunAsync(id, cts.Token, CancellationToken.None);
 
         var campaign = await LoadAsync(id);
-        Assert.Equal(CampaignStatus.Cancelled, campaign.Status);
-        Assert.All(campaign.Targets, t => Assert.Equal(TargetStatus.Cancelled, t.Status));
+        Assert.Equal(CampaignStatus.Stopped, campaign.Status);
+        Assert.All(campaign.Targets, t => Assert.Equal(TargetStatus.Pending, t.Status));
+        Assert.True(campaign.CanBeResumed);
+        Assert.Null(campaign.ExecutionOwnerId);
         Assert.Empty(_automation.PublishedTo);
     }
 
@@ -217,9 +224,7 @@ public class CampaignRunnerTests
         {
             Name = "Test",
             ContentPostId = contentId,
-            Status = status,
-            MinDelaySeconds = 0,
-            MaxDelaySeconds = 0
+            Status = status
         };
         if (requireApproval)
         {
@@ -287,6 +292,9 @@ public class CampaignRunnerTests
         public List<string> PublishedTo { get; } = [];
         public bool ApprovalRequested { get; private set; }
 
+        /// <summary>Runs after a (simulated) successful submission — e.g. to press Stop after the 60th post.</summary>
+        public Func<string, Task>? AfterPublish { get; set; }
+
         public bool IsBrowserOpen => true;
 
         public Task<SessionStatus> CheckSessionAsync(CancellationToken cancellationToken)
@@ -320,7 +328,15 @@ public class CampaignRunnerTests
                     return PublishResult.RejectedByUser();
                 }
             }
-            PublishedTo.Add(groupUrl);
+            cancellationToken.ThrowIfCancellationRequested();
+            lock (PublishedTo)
+            {
+                PublishedTo.Add(groupUrl);
+            }
+            if (AfterPublish is not null)
+            {
+                await AfterPublish(groupUrl);
+            }
             if (HaltOnPublish.Contains(slug))
             {
                 throw new AutomationHaltedException(HaltReason.Restricted, "You can't post right now.");
@@ -331,7 +347,7 @@ public class CampaignRunnerTests
         public Task CloseBrowserAsync() => Task.CompletedTask;
     }
 
-    private sealed class FakeStorage : IFileStorage
+    internal sealed class FakeStorage : IFileStorage
     {
         public Task<StoredFile> SaveAsync(Stream content, string originalFileName, long maxBytes, CancellationToken cancellationToken) =>
             throw new NotSupportedException();
@@ -347,7 +363,7 @@ public class CampaignRunnerTests
         }
     }
 
-    private sealed class RecordingNotifier : ICampaignProgressNotifier
+    internal sealed class RecordingNotifier : ICampaignProgressNotifier
     {
         public List<CampaignMessage> Messages { get; } = [];
 

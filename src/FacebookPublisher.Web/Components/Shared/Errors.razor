@@ -1,0 +1,10 @@
+@foreach (var error in All.Where(e => e.Field == For))
+{
+    <div class="validation-message">@error.Message</div>
+}
+
+@code {
+    [Parameter, EditorRequired] public string For { get; set; } = string.Empty;
+
+    [Parameter] public IReadOnlyList<PacingError> All { get; set; } = [];
+}
