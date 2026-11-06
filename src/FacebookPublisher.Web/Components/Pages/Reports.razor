@@ -76,5 +76,9 @@
         : _campaigns!.Where(c => c.Name.Contains(_search, StringComparison.OrdinalIgnoreCase) || c.ContentTitle.Contains(_search, StringComparison.OrdinalIgnoreCase));
 
     protected override async Task OnInitializedAsync() =>
-        await RunAsync(async () => _campaigns = (await CampaignService.ListAsync()).ToList());
+        await RunAsync(async () =>
+        {
+            await CampaignService.ReconcileOrphanedCampaignsAsync();
+            _campaigns = (await CampaignService.ListAsync()).ToList();
+        });
 }

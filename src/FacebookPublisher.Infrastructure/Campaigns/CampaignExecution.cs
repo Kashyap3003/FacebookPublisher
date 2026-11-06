@@ -5,6 +5,25 @@ using FacebookPublisher.Application.Automation;
 
 namespace FacebookPublisher.Infrastructure.Campaigns;
 
+/// <summary>Uniform inclusive random integers from the shared thread-safe generator.</summary>
+public sealed class SystemRandomSource : IRandomSource
+{
+    public int NextInclusive(int minInclusive, int maxInclusive)
+    {
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(minInclusive, maxInclusive);
+        return maxInclusive == int.MaxValue
+            ? (int)Random.Shared.NextInt64(minInclusive, (long)maxInclusive + 1)
+            : Random.Shared.Next(minInclusive, maxInclusive + 1);
+    }
+}
+
+/// <summary>Real waiting: Task.Delay honours the CancellationToken, so Stop interrupts even multi-hour delays at once.</summary>
+public sealed class TaskAsyncDelay : IAsyncDelay
+{
+    public Task DelayAsync(TimeSpan duration, CancellationToken cancellationToken) =>
+        duration <= TimeSpan.Zero ? Task.CompletedTask : Task.Delay(duration, cancellationToken);
+}
+
 public sealed class CampaignQueue : ICampaignQueue
 {
     private readonly Channel<Guid> _channel = Channel.CreateUnbounded<Guid>(new UnboundedChannelOptions { SingleReader = true });
@@ -21,6 +40,10 @@ public sealed class CampaignExecutionTracker : ICampaignExecutionTracker
     private readonly Lock _lock = new();
     private Guid? _activeId;
     private CancellationTokenSource? _cts;
+
+    public Guid InstanceId { get; } = Guid.NewGuid();
+
+    public DateTime StartedAtUtc { get; } = DateTime.UtcNow;
 
     public Guid? ActiveCampaignId
     {

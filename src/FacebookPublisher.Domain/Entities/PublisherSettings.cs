@@ -7,9 +7,8 @@ public class PublisherSettings
 
     public int Id { get; set; } = SingletonId;
 
-    public int DefaultMinDelaySeconds { get; set; } = 10;
-
-    public int DefaultMaxDelaySeconds { get; set; } = 20;
+    /// <summary>Default batch/delay configuration for new campaigns (each campaign keeps its own copy).</summary>
+    public BatchPacingConfig Pacing { get; set; } = new();
 
     public bool RequireApprovalByDefault { get; set; }
 

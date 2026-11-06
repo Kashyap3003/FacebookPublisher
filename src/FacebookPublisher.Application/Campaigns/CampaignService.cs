@@ -7,6 +7,10 @@ using Microsoft.Extensions.Logging;
 
 namespace FacebookPublisher.Application.Campaigns;
 
+/// <summary>
+/// User-initiated campaign operations. Execution only happens when the user clicks Start or Resume; both put the
+/// campaign on the existing queue and the runner then processes only the groups that are still Pending in the database.
+/// </summary>
 public sealed class CampaignService(
     IApplicationDbContextFactory dbFactory,
     ICampaignQueue queue,
@@ -15,10 +19,20 @@ public sealed class CampaignService(
     ICampaignProgressNotifier notifier,
     ILogger<CampaignService> logger)
 {
-    public const int MinimumDelaySeconds = 5;
+    /// <summary>A Queued/Running campaign whose heartbeat is older than this (and owned by another process) is orphaned.</summary>
+    public static readonly TimeSpan OrphanAfter = TimeSpan.FromMinutes(3);
 
-    public async Task<Guid> CreateAndStartAsync(CreateCampaignRequest request, CancellationToken ct = default)
+    public const string InterruptedReason =
+        "The application stopped while this campaign was running. Resume it to continue with the remaining groups.";
+
+    public const string OutcomeUnknownReason =
+        "The application stopped while this post was being published, so it is not known whether Facebook accepted it. " +
+        "Check the group on Facebook, then confirm below. It is never retried automatically.";
+
+    /// <summary>Creates a campaign with a snapshot of the given batch/delay settings and optionally starts it.</summary>
+    public async Task<Guid> CreateAsync(CreateCampaignRequest request, bool start, CancellationToken ct = default)
     {
+        await ReconcileOrphanedCampaignsAsync(ct);
         await using var db = await dbFactory.CreateAsync(ct);
         var settings = await db.Settings.AsNoTracking().FirstOrDefaultAsync(s => s.Id == PublisherSettings.SingletonId, ct)
             ?? new PublisherSettings();
@@ -38,14 +52,7 @@ public sealed class CampaignService(
         {
             errors.Add($"A campaign can target at most {settings.MaxGroupsPerCampaign} groups (see Settings).");
         }
-        if (request.MinDelaySeconds < MinimumDelaySeconds)
-        {
-            errors.Add($"Minimum delay must be at least {MinimumDelaySeconds} seconds.");
-        }
-        if (request.MaxDelaySeconds < request.MinDelaySeconds || request.MaxDelaySeconds > 3600)
-        {
-            errors.Add("Maximum delay must be between the minimum delay and 3600 seconds.");
-        }
+        errors.AddRange(BatchPacingValidator.Validate(request.Pacing).Select(e => e.Message));
 
         var content = await db.Contents.AsNoTracking().FirstOrDefaultAsync(c => c.Id == request.ContentId, ct);
         if (content is null)
@@ -60,7 +67,7 @@ public sealed class CampaignService(
         }
 
         // Guards against double-clicks or a second tab re-submitting the same campaign.
-        if (content is not null && await db.Campaigns.AnyAsync(
+        if (start && content is not null && await db.Campaigns.AnyAsync(
                 c => c.ContentPostId == content.Id &&
                      (c.Status == CampaignStatus.Queued || c.Status == CampaignStatus.Running), ct))
         {
@@ -69,17 +76,16 @@ public sealed class CampaignService(
 
         if (errors.Count > 0)
         {
-            throw new AppValidationException("The campaign cannot be started.", errors);
+            throw new AppValidationException("The campaign cannot be created.", errors);
         }
 
         var campaign = new Campaign
         {
             Name = name,
             ContentPostId = request.ContentId,
-            MinDelaySeconds = request.MinDelaySeconds,
-            MaxDelaySeconds = request.MaxDelaySeconds,
+            Pacing = request.Pacing.Clone(),
             RequireApproval = request.RequireApproval,
-            Status = CampaignStatus.Queued
+            Status = CampaignStatus.NotStarted
         };
 
         var order = 0;
@@ -94,38 +100,221 @@ public sealed class CampaignService(
                 MembershipStatus = group.LastMembershipStatus
             });
         }
+        campaign.RemainingGroupCount = campaign.Targets.Count;
+
+        if (start)
+        {
+            MarkQueued(campaign);
+        }
 
         db.Campaigns.Add(campaign);
         await db.SaveChangesAsync(ct);
-        await queue.EnqueueAsync(campaign.Id, ct);
+        if (start)
+        {
+            await queue.EnqueueAsync(campaign.Id, ct);
+        }
 
-        logger.LogInformation("Campaign {CampaignId} '{Name}' queued with {TargetCount} group(s)", campaign.Id, campaign.Name, campaign.Targets.Count);
+        logger.LogInformation("Campaign {CampaignId} '{Name}' created with {TargetCount} group(s); started: {Started}",
+            campaign.Id, campaign.Name, campaign.Targets.Count, start);
         return campaign.Id;
     }
 
-    public async Task CancelAsync(Guid campaignId, CancellationToken ct = default)
+    /// <summary>Starts a campaign that was saved without starting.</summary>
+    public Task StartAsync(Guid campaignId, CancellationToken ct = default) =>
+        QueueForExecutionAsync(campaignId, resume: false, ct);
+
+    /// <summary>
+    /// Continues a stopped, interrupted, halted or finished campaign with its remaining Pending groups. Groups already
+    /// published or with an unknown outcome are never processed again; the original batch/delay snapshot is used.
+    /// </summary>
+    public Task ResumeAsync(Guid campaignId, CancellationToken ct = default) =>
+        QueueForExecutionAsync(campaignId, resume: true, ct);
+
+    private async Task QueueForExecutionAsync(Guid campaignId, bool resume, CancellationToken ct)
     {
-        if (tracker.RequestCancel(campaignId))
-        {
-            logger.LogInformation("Cancellation requested for running campaign {CampaignId}", campaignId);
-            return;
-        }
+        await ReconcileOrphanedCampaignsAsync(ct);
 
         await using var db = await dbFactory.CreateAsync(ct);
         var campaign = await db.Campaigns.Include(c => c.Targets).Include(c => c.ContentPost)
             .FirstOrDefaultAsync(c => c.Id == campaignId, ct)
             ?? throw new NotFoundException("Campaign", campaignId);
 
-        if (campaign.Status is not (CampaignStatus.Queued or CampaignStatus.Halted))
+        if (campaign.IsActive)
         {
-            throw new AppValidationException($"A campaign in status '{campaign.Status.ToDisplay()}' cannot be cancelled.");
+            throw new AppValidationException("This campaign is already queued or running.");
         }
 
-        foreach (var target in campaign.Targets.Where(t => t.IsProcessable))
+        if (resume)
         {
-            target.SetStatus(TargetStatus.Cancelled, "Campaign was cancelled before this group was processed.");
+            ConvertLegacyCancelledTargets(campaign);
+            if (!campaign.CanBeResumed)
+            {
+                throw new AppValidationException(campaign.Status == CampaignStatus.NotStarted
+                    ? "This campaign has not been started yet. Use Start."
+                    : "There are no Pending groups left to process in this campaign.");
+            }
         }
-        campaign.Finish(CampaignStatus.Cancelled, "Cancelled by user.");
+        else if (!campaign.CanBeStarted)
+        {
+            throw new AppValidationException("This campaign has already been started. Use Resume to continue with its remaining groups.");
+        }
+
+        if (await db.Campaigns.AnyAsync(c => c.Id != campaign.Id && c.ContentPostId == campaign.ContentPostId &&
+                                             (c.Status == CampaignStatus.Queued || c.Status == CampaignStatus.Running), ct))
+        {
+            throw new AppValidationException("Another campaign with the same content is queued or running.");
+        }
+
+        MarkQueued(campaign);
+        campaign.ReconcileProgress();
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            // Another request (second click, second tab) changed the campaign first: never execute it twice.
+            throw new AppValidationException("This campaign was just started or changed by another request. Refresh the page.");
+        }
+
+        await queue.EnqueueAsync(campaign.Id, ct);
+        logger.LogInformation("Campaign {CampaignId} queued ({Mode}) with {Remaining} remaining group(s)",
+            campaignId, resume ? "resume" : "start", campaign.RemainingGroupCount);
+        await notifier.CampaignChangedAsync(CampaignProgressDto.From(campaign), ct);
+    }
+
+    /// <summary>Stops a queued or running campaign. Remaining groups stay Pending so it can be resumed later.</summary>
+    public async Task StopAsync(Guid campaignId, CancellationToken ct = default)
+    {
+        if (tracker.RequestCancel(campaignId))
+        {
+            logger.LogInformation("Stop requested for running campaign {CampaignId}", campaignId);
+            return;
+        }
+
+        await ReconcileOrphanedCampaignsAsync(ct);
+        await using var db = await dbFactory.CreateAsync(ct);
+        var campaign = await db.Campaigns.Include(c => c.Targets).Include(c => c.ContentPost)
+            .FirstOrDefaultAsync(c => c.Id == campaignId, ct)
+            ?? throw new NotFoundException("Campaign", campaignId);
+
+        if (campaign.Status != CampaignStatus.Queued)
+        {
+            throw new AppValidationException($"A campaign in status '{campaign.Status.ToDisplay()}' is not running.");
+        }
+
+        campaign.Finish(CampaignStatus.Stopped, "Stopped by user before it started running. Resume to continue.");
+        campaign.ReconcileProgress();
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            // The worker claimed it in the meantime; route the request to the running execution instead.
+            tracker.RequestCancel(campaignId);
+            return;
+        }
+
+        logger.LogInformation("Queued campaign {CampaignId} stopped before execution", campaignId);
+        await notifier.CampaignChangedAsync(CampaignProgressDto.From(campaign), ct);
+    }
+
+    /// <summary>
+    /// Manual verification of a group whose outcome is unknown. Confirmed → Published (excluded from every resume);
+    /// not published → Pending (processed by the next Start/Resume).
+    /// </summary>
+    public async Task ResolveUnknownOutcomeAsync(Guid targetId, bool wasPublished, CancellationToken ct = default)
+    {
+        await using var db = await dbFactory.CreateAsync(ct);
+        var target = await db.CampaignTargets.FirstOrDefaultAsync(t => t.Id == targetId, ct)
+            ?? throw new NotFoundException("Group", targetId);
+        var campaign = await db.Campaigns.Include(c => c.Targets).Include(c => c.ContentPost)
+            .FirstAsync(c => c.Id == target.CampaignId, ct);
+
+        if (target.Status != TargetStatus.OutcomeUnknown)
+        {
+            throw new AppValidationException("Only groups with an unknown outcome can be verified.");
+        }
+        if (campaign.IsActive)
+        {
+            throw new AppValidationException("Stop the campaign before verifying groups.");
+        }
+
+        if (wasPublished)
+        {
+            target.SetStatus(TargetStatus.Published, "Marked as published after manual verification.");
+        }
+        else
+        {
+            target.BatchNumber = null;
+            target.SetStatus(TargetStatus.Pending, "Returned to Pending after manual verification (not published).");
+        }
+
+        campaign.ReconcileProgress();
+        if (campaign.Status is CampaignStatus.Completed or CampaignStatus.CompletedWithErrors && campaign.RemainingGroupCount == 0)
+        {
+            campaign.Status = campaign.FinalStatus();
+        }
+        campaign.Touch(); // bumps the row version so a concurrent Resume/Start cannot slip in unnoticed
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            throw new AppValidationException("The campaign changed while you were verifying. Refresh the page.");
+        }
+
+        logger.LogInformation("Target {TargetId} manually verified as {Result}", targetId, wasPublished ? "published" : "not published");
+        await notifier.CampaignChangedAsync(CampaignProgressDto.From(campaign), ct);
+    }
+
+    /// <summary>
+    /// Finds campaigns left Queued/Running by a previous application process (shutdown or crash) and marks them
+    /// Interrupted. Groups caught mid-publish become Outcome Unknown; groups mid-check go back to Pending.
+    /// Called when the user opens the app's pages or starts/resumes a campaign — never by a background job.
+    /// </summary>
+    public async Task<int> ReconcileOrphanedCampaignsAsync(CancellationToken ct = default)
+    {
+        await using var db = await dbFactory.CreateAsync(ct);
+        var me = tracker.InstanceId;
+        var staleBefore = DateTime.UtcNow - OrphanAfter;
+        var processStart = tracker.StartedAtUtc;
+
+        var orphans = await db.Campaigns
+            .Include(c => c.Targets)
+            .Include(c => c.ContentPost)
+            .Where(c => (c.Status == CampaignStatus.Queued || c.Status == CampaignStatus.Running)
+                        && (c.ExecutionOwnerId == null || c.ExecutionOwnerId != me)
+                        && (c.LastExecutionAtUtc == null || c.LastExecutionAtUtc < staleBefore || c.LastExecutionAtUtc < processStart))
+            .ToListAsync(ct);
+
+        foreach (var campaign in orphans)
+        {
+            foreach (var target in campaign.Targets)
+            {
+                switch (target.Status)
+                {
+                    case TargetStatus.Publishing:
+                    case TargetStatus.AwaitingApproval:
+                        target.SetStatus(TargetStatus.OutcomeUnknown, OutcomeUnknownReason);
+                        break;
+                    case TargetStatus.CheckingMembership:
+                    case TargetStatus.Eligible:
+                        target.BatchNumber = null;
+                        target.SetStatus(TargetStatus.Pending);
+                        break;
+                }
+            }
+            campaign.Finish(CampaignStatus.Interrupted, InterruptedReason);
+            campaign.ReconcileProgress();
+        }
+
+        if (orphans.Count == 0)
+        {
+            return 0;
+        }
 
         try
         {
@@ -133,37 +322,16 @@ public sealed class CampaignService(
         }
         catch (DbUpdateConcurrencyException)
         {
-            // The worker picked it up in the meantime; route the request to it instead.
-            tracker.RequestCancel(campaignId);
-            return;
+            logger.LogInformation("Orphaned campaign recovery skipped: a campaign changed concurrently");
+            return 0;
         }
 
-        logger.LogInformation("Campaign {CampaignId} cancelled before execution", campaignId);
-        await notifier.CampaignChangedAsync(CampaignProgressDto.From(campaign), ct);
-    }
-
-    /// <summary>Re-queues a halted campaign. Already-processed groups are never re-published.</summary>
-    public async Task ResumeAsync(Guid campaignId, CancellationToken ct = default)
-    {
-        await using var db = await dbFactory.CreateAsync(ct);
-        var campaign = await db.Campaigns.Include(c => c.Targets).Include(c => c.ContentPost)
-            .FirstOrDefaultAsync(c => c.Id == campaignId, ct)
-            ?? throw new NotFoundException("Campaign", campaignId);
-
-        if (!campaign.CanBeResumed)
+        foreach (var campaign in orphans)
         {
-            throw new AppValidationException("Only halted campaigns with unprocessed groups can be resumed.");
+            logger.LogWarning("Campaign {CampaignId} was interrupted by an application stop; marked Interrupted", campaign.Id);
+            await notifier.CampaignChangedAsync(CampaignProgressDto.From(campaign), ct);
         }
-
-        campaign.Status = CampaignStatus.Queued;
-        campaign.StatusReason = null;
-        campaign.CompletedAtUtc = null;
-        campaign.Touch();
-        await db.SaveChangesAsync(ct);
-        await queue.EnqueueAsync(campaign.Id, ct);
-
-        logger.LogInformation("Campaign {CampaignId} resumed", campaignId);
-        await notifier.CampaignChangedAsync(CampaignProgressDto.From(campaign), ct);
+        return orphans.Count;
     }
 
     public bool SubmitApproval(Guid targetId, bool approve)
@@ -223,5 +391,35 @@ public sealed class CampaignService(
                 c.Id, c.Name, c.ContentTitle, c.Status, c.StatusReason, c.CreatedAtUtc, c.StartedAtUtc, c.CompletedAtUtc,
                 CampaignCountsDto.From(c.Statuses)))
             .ToList();
+    }
+
+    private void MarkQueued(Campaign campaign)
+    {
+        campaign.Status = CampaignStatus.Queued;
+        campaign.StatusReason = null;
+        campaign.CompletedAtUtc = null;
+        campaign.ExecutionOwnerId = tracker.InstanceId;
+        campaign.LastExecutionAtUtc = DateTime.UtcNow;
+        campaign.Touch();
+    }
+
+    /// <summary>
+    /// Campaigns cancelled before Stop/Resume existed marked their unprocessed groups Cancelled. Those never reached
+    /// Facebook and become Pending again; a group cancelled after a publish attempt is treated as Outcome Unknown.
+    /// </summary>
+    private static void ConvertLegacyCancelledTargets(Campaign campaign)
+    {
+        foreach (var target in campaign.Targets.Where(t => t.Status == TargetStatus.Cancelled))
+        {
+            if (target.PublishAttempts > 0)
+            {
+                target.SetStatus(TargetStatus.OutcomeUnknown, OutcomeUnknownReason);
+            }
+            else
+            {
+                target.BatchNumber = null;
+                target.SetStatus(TargetStatus.Pending);
+            }
+        }
     }
 }

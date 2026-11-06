@@ -1,0 +1,88 @@
+@* Advanced Batch Processing & Delay Settings. Edits a BatchPacingConfig in place and validates on every change
+   with the same BatchPacingValidator the services use, so the UI and server rules can never disagree. *@
+
+<div class="row g-3">
+    <div class="col-md-6">
+        <div class="pacing-group">
+            <div class="pacing-title"><i class="bi bi-collection"></i> Batch size <span class="text-muted fw-normal">(groups per batch)</span></div>
+            <div class="row g-2">
+                <div class="col">
+                    <label class="form-label" for="@Id("batch-min")">Minimum</label>
+                    <input id="@Id("batch-min")" type="number" class="form-control @Invalid(BatchPacingValidator.BatchSizeField)" min="1" max="@BatchPacingValidator.MaxBatchSize" step="1"
+                           disabled="@Disabled" @bind="Value.MinBatchSize" @bind:after="ChangedAsync" />
+                </div>
+                <div class="col">
+                    <label class="form-label" for="@Id("batch-max")">Maximum</label>
+                    <input id="@Id("batch-max")" type="number" class="form-control @Invalid(BatchPacingValidator.BatchSizeField)" min="1" max="@BatchPacingValidator.MaxBatchSize" step="1"
+                           disabled="@Disabled" @bind="Value.MaxBatchSize" @bind:after="ChangedAsync" />
+                </div>
+            </div>
+            <Errors For="@BatchPacingValidator.BatchSizeField" All="_errors" />
+            <div class="form-text">A new random size in this range (inclusive) is chosen for every batch.</div>
+        </div>
+    </div>
+
+    <div class="col-md-6">
+        <DelayRangeFields Title="Delay between posts" Icon="bi-hourglass-split" Hint="Random wait between two groups of the same batch. Not applied after the last group of a batch."
+                          Range="Value.PostDelay" Units="BatchPacingValidator.PostDelayUnits" Field="@BatchPacingValidator.PostDelayField"
+                          IdPrefix="@Id("post")" Disabled="Disabled" Errors="_errors" OnChanged="ChangedAsync" />
+    </div>
+
+    <div class="col-md-6">
+        <DelayRangeFields Title="Delay between batches" Icon="bi-pause-circle" Hint="Random break after each batch. Not applied after the final batch."
+                          Range="Value.BatchDelay" Units="BatchPacingValidator.BatchDelayUnits" Field="@BatchPacingValidator.BatchDelayField"
+                          IdPrefix="@Id("batch-delay")" Disabled="Disabled" Errors="_errors" OnChanged="ChangedAsync" />
+    </div>
+
+    <div class="col-md-6">
+        <div class="pacing-group">
+            <div class="pacing-title"><i class="bi bi-moon"></i> Extended delay</div>
+            <div class="mb-2">
+                <label class="form-label" for="@Id("ext-after")">Apply extended delay after</label>
+                <div class="input-group">
+                    <input id="@Id("ext-after")" type="number" class="form-control @Invalid(BatchPacingValidator.ExtendedAfterField)" min="1" max="@BatchPacingValidator.MaxExtendedDelayAfterBatches" step="1"
+                           disabled="@Disabled" @bind="Value.ExtendedDelayAfterBatches" @bind:after="ChangedAsync" />
+                    <span class="input-group-text">completed batches</span>
+                </div>
+                <Errors For="@BatchPacingValidator.ExtendedAfterField" All="_errors" />
+            </div>
+            <DelayRangeFields Title="" Embedded="true" Range="Value.ExtendedDelay" Units="BatchPacingValidator.ExtendedDelayUnits" Field="@BatchPacingValidator.ExtendedDelayField"
+                              IdPrefix="@Id("ext")" Disabled="Disabled" Errors="_errors" OnChanged="ChangedAsync"
+                              Hint="Replaces the normal batch delay every time the number of completed batches above is reached." />
+        </div>
+    </div>
+</div>
+
+@if (ShowSummary)
+{
+    <div class="form-text mt-2"><i class="bi bi-info-circle"></i> @DurationText.Summary(Value)</div>
+}
+
+@code {
+    [Parameter, EditorRequired] public BatchPacingConfig Value { get; set; } = default!;
+
+    /// <summary>Called after every change, with the current validation result.</summary>
+    [Parameter] public EventCallback<bool> OnValidityChanged { get; set; }
+
+    [Parameter] public string IdPrefix { get; set; } = "pacing";
+
+    [Parameter] public bool Disabled { get; set; }
+
+    [Parameter] public bool ShowSummary { get; set; } = true;
+
+    private IReadOnlyList<PacingError> _errors = [];
+
+    public bool IsValid => _errors.Count == 0;
+
+    protected override void OnParametersSet() => _errors = BatchPacingValidator.Validate(Value);
+
+    private async Task ChangedAsync()
+    {
+        _errors = BatchPacingValidator.Validate(Value);
+        await OnValidityChanged.InvokeAsync(_errors.Count == 0);
+    }
+
+    private string Id(string name) => $"{IdPrefix}-{name}";
+
+    private string Invalid(string field) => _errors.Any(e => e.Field == field) ? "is-invalid" : string.Empty;
+}

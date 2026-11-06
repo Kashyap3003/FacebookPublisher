@@ -31,6 +31,9 @@ public class CampaignTarget : BaseEntity
     /// <summary>Number of times a Post submission was started. Never exceeds 1 for a successful target.</summary>
     public int PublishAttempts { get; set; }
 
+    /// <summary>Batch in which this group was processed; null while Pending.</summary>
+    public int? BatchNumber { get; set; }
+
     /// <summary>Targets the runner may still work on. Terminal states are never re-processed, which prevents duplicate posts.</summary>
     public bool IsProcessable => Status is TargetStatus.Pending or TargetStatus.CheckingMembership or TargetStatus.Eligible;
 

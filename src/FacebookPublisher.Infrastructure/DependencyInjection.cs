@@ -35,6 +35,8 @@ public static class DependencyInjection
         services.AddSingleton<ICampaignQueue, CampaignQueue>();
         services.AddSingleton<ICampaignExecutionTracker, CampaignExecutionTracker>();
         services.AddSingleton<ICampaignApprovalGate, CampaignApprovalGate>();
+        services.AddSingleton<IRandomSource, SystemRandomSource>();
+        services.AddSingleton<IAsyncDelay, TaskAsyncDelay>();
         return services;
     }
 }

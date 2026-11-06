@@ -8,10 +8,14 @@ using Microsoft.Extensions.Logging;
 namespace FacebookPublisher.Application.Campaigns;
 
 /// <summary>
-/// Executes one campaign: verifies the session, then for each group checks membership, prevents duplicates,
-/// publishes (optionally after user approval) and waits the configured delay. A failing group never stops the
-/// others; a Facebook restriction/checkpoint/expired session halts the whole campaign.
-/// Every stage is reported to the live activity feed through <see cref="ICampaignProgressNotifier.MessageAsync"/>.
+/// Executes one campaign (the application's only execution engine). Groups are processed in randomly sized batches
+/// with random delays between posts, between batches, and an extended break after every N completed batches.
+/// <para>
+/// The database is the source of truth: only Pending groups are processed, every group's result and the batch
+/// counters are saved after each step, and the pending delay is persisted so a stopped campaign can be resumed
+/// without skipping or repeating work. A failing group never stops the others; a Facebook restriction, checkpoint or
+/// expired session halts the whole campaign.
+/// </para>
 /// </summary>
 public sealed class CampaignRunner(
     IApplicationDbContextFactory dbFactory,
@@ -19,8 +23,14 @@ public sealed class CampaignRunner(
     IFileStorage storage,
     ICampaignApprovalGate approvalGate,
     ICampaignProgressNotifier notifier,
+    IBatchDelayService batchDelays,
+    IAsyncDelay asyncDelay,
+    ICampaignExecutionTracker tracker,
     ILogger<CampaignRunner> logger)
 {
+    /// <summary>Long waits are split into chunks so the heartbeat (execution lease) stays fresh.</summary>
+    public static readonly TimeSpan HeartbeatInterval = TimeSpan.FromMinutes(1);
+
     public async Task RunAsync(Guid campaignId, CancellationToken cancellationToken, CancellationToken hostStoppingToken)
     {
         await using var db = await dbFactory.CreateAsync(CancellationToken.None);
@@ -35,32 +45,50 @@ public sealed class CampaignRunner(
             logger.LogInformation("Campaign {CampaignId} is not queued (status: {Status}); skipping", campaignId, campaign?.Status);
             return;
         }
+        if (campaign.ExecutionOwnerId is { } owner && owner != tracker.InstanceId)
+        {
+            logger.LogWarning("Campaign {CampaignId} is leased by another application instance; skipping", campaignId);
+            return;
+        }
 
-        campaign.MarkRunning();
+        // Claim the execution lease. The row version makes this atomic: a concurrent claim or Stop makes it fail.
+        campaign.MarkRunning(tracker.InstanceId);
+        campaign.ReconcileProgress();
         try
         {
             await db.SaveChangesAsync(CancellationToken.None);
         }
         catch (DbUpdateConcurrencyException)
         {
-            logger.LogInformation("Campaign {CampaignId} changed before it could start (probably cancelled); skipping", campaignId);
+            logger.LogInformation("Campaign {CampaignId} changed before it could start (stopped or already claimed); skipping", campaignId);
             return;
         }
 
         using var _ = logger.BeginScope(new Dictionary<string, object> { ["CampaignId"] = campaignId });
-        logger.LogInformation("Campaign '{Name}' started with {TargetCount} group(s)", campaign.Name, campaign.Targets.Count);
+        var pacing = campaign.Pacing;
+        var remainingAtStart = campaign.Targets.Count(t => t.IsProcessable);
+        logger.LogInformation("Campaign '{Name}' started with {Remaining} of {Total} group(s) remaining", campaign.Name, remainingAtStart, campaign.Targets.Count);
         await NotifyCampaignAsync(campaign);
 
-        var pending = campaign.Targets.Where(t => t.IsProcessable).OrderBy(t => t.Order).ToList();
+        var resumed = campaign.Targets.Any(t => !t.IsProcessable);
         await EmitAsync(campaign, CampaignMessageLevel.Info,
-            $"Campaign started: {pending.Count} group(s) to process, {campaign.MinDelaySeconds}–{campaign.MaxDelaySeconds}s between groups, " +
-            (campaign.RequireApproval ? "each post reviewed before publishing." : "fully automatic posting."));
+            (resumed
+                ? $"Campaign resumed: {remainingAtStart} remaining group(s); {campaign.Targets.Count - remainingAtStart} already processed and skipped. "
+                : $"Campaign started: {remainingAtStart} group(s). ")
+            + DurationText.Summary(pacing) + ". "
+            + (campaign.RequireApproval ? "Each post is reviewed before publishing." : "Fully automatic posting."));
 
         var settings = await db.Settings.AsNoTracking().FirstOrDefaultAsync(s => s.Id == PublisherSettings.SingletonId, CancellationToken.None)
             ?? new PublisherSettings();
 
         try
         {
+            var pacingErrors = BatchPacingValidator.Validate(pacing);
+            if (pacingErrors.Count > 0)
+            {
+                throw new InvalidOperationException("Invalid batch/delay configuration: " + string.Join(" ", pacingErrors.Select(e => e.Message)));
+            }
+
             var request = BuildRequest(campaign.ContentPost!, settings);
 
             await EmitAsync(campaign, CampaignMessageLevel.Step, "Starting the browser and checking the Facebook session…");
@@ -71,26 +99,58 @@ public sealed class CampaignRunner(
             }
             await EmitAsync(campaign, CampaignMessageLevel.Success, "Facebook session is active.");
 
-            for (var i = 0; i < pending.Count; i++)
+            var processedThisRun = 0;
+            while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (i > 0)
+
+                // A batch whose last group was saved but whose rollover was not (crash between two saves).
+                if (campaign.CurrentBatchSize > 0 && campaign.CurrentBatchProcessed >= campaign.CurrentBatchSize
+                    && campaign.Targets.Any(t => t.IsProcessable) && campaign.CurrentDelayKind == DelayKind.None)
                 {
-                    await DelayAsync(campaign, cancellationToken);
+                    await CompleteBatchAndScheduleNextAsync(campaign, pacing);
+                    await SaveCampaignAsync(db, campaign);
                 }
 
-                var target = pending[i];
-                await EmitAsync(campaign, CampaignMessageLevel.Info, $"Group {i + 1} of {pending.Count}: {target.GroupName}", target);
-                await ProcessTargetAsync(db, campaign, target, request, settings, cancellationToken);
+                // Resume policy: finish the remaining part of a delay that was interrupted; skip it if already elapsed.
+                await WaitForScheduledDelayAsync(db, campaign, cancellationToken);
+
+                var next = campaign.Targets.Where(t => t.IsProcessable).OrderBy(t => t.Order).FirstOrDefault();
+                if (next is null)
+                {
+                    break;
+                }
+
+                // No batch open yet (first run, or the previous run completed its final batch): open one.
+                if (campaign.CurrentBatchNumber == 0 || campaign.CurrentBatchSize == 0)
+                {
+                    campaign.StartBatch(Math.Max(1, campaign.CurrentBatchNumber), batchDelays.GenerateRandomBatchSize(pacing));
+                    await SaveCampaignAsync(db, campaign);
+                    await EmitAsync(campaign, CampaignMessageLevel.Info, $"Batch {campaign.CurrentBatchNumber} started: {campaign.CurrentBatchSize} group(s).");
+                }
+                else if (campaign.CurrentBatchProcessed == 0)
+                {
+                    await EmitAsync(campaign, CampaignMessageLevel.Info, $"Batch {campaign.CurrentBatchNumber} started: {campaign.CurrentBatchSize} group(s).");
+                }
+
+                processedThisRun++;
+                await EmitAsync(campaign, CampaignMessageLevel.Info,
+                    $"Group {processedThisRun} of {remainingAtStart} (batch {campaign.CurrentBatchNumber}, group {campaign.CurrentBatchProcessed + 1} of {campaign.CurrentBatchSize}): {next.GroupName}",
+                    next);
+
+                next.BatchNumber = campaign.CurrentBatchNumber;
+                await ProcessTargetAsync(db, campaign, next, request, settings, cancellationToken);
+                await AfterGroupProcessedAsync(db, campaign, next, pacing);
             }
 
-            var hasErrors = campaign.Targets.Any(t => t.Status is TargetStatus.Failed or TargetStatus.Inaccessible);
-            campaign.Finish(hasErrors ? CampaignStatus.CompletedWithErrors : CampaignStatus.Completed);
+            campaign.ClearDelay();
+            campaign.Finish(campaign.FinalStatus());
             logger.LogInformation("Campaign finished with status {Status}", campaign.Status);
 
             var counts = CampaignCountsDto.From(campaign.Targets.Select(t => t.Status));
-            await EmitAsync(campaign, hasErrors ? CampaignMessageLevel.Warning : CampaignMessageLevel.Success,
-                $"Campaign finished: {counts.Published} published, {counts.Skipped} skipped, {counts.Inaccessible} inaccessible, {counts.Failed} failed.");
+            await EmitAsync(campaign, campaign.Status == CampaignStatus.Completed ? CampaignMessageLevel.Success : CampaignMessageLevel.Warning,
+                $"Campaign finished after {campaign.CompletedBatches} batch(es): {counts.Published} published, {counts.Skipped} skipped, " +
+                $"{counts.Inaccessible} inaccessible, {counts.Failed} failed, {counts.OutcomeUnknown} unknown outcome.");
         }
         catch (AutomationHaltedException ex)
         {
@@ -100,20 +160,19 @@ public sealed class CampaignRunner(
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            // Groups not yet processed stay Pending; published groups and batch counters are already saved.
             if (hostStoppingToken.IsCancellationRequested)
             {
                 logger.LogWarning("Campaign interrupted by application shutdown");
-                campaign.Finish(CampaignStatus.Halted, "The application stopped while the campaign was running. Resume it to continue with the remaining groups.");
+                campaign.Finish(CampaignStatus.Interrupted,
+                    "The application stopped while this campaign was running. Resume it to continue with the remaining groups.");
             }
             else
             {
-                foreach (var target in campaign.Targets.Where(t => t.IsProcessable))
-                {
-                    target.SetStatus(TargetStatus.Cancelled, "Campaign was cancelled before this group was processed.");
-                }
-                logger.LogInformation("Campaign cancelled by user");
-                campaign.Finish(CampaignStatus.Cancelled, "Cancelled by user.");
-                await EmitAsync(campaign, CampaignMessageLevel.Warning, "Campaign cancelled. Remaining groups were not processed.");
+                logger.LogInformation("Campaign stopped by user");
+                campaign.Finish(CampaignStatus.Stopped, "Stopped by user. Resume to continue with the remaining groups.");
+                await EmitAsync(campaign, CampaignMessageLevel.Warning,
+                    $"Campaign stopped. {campaign.Targets.Count(t => t.IsProcessable)} group(s) remain Pending; press Resume to continue.");
             }
         }
         catch (Exception ex)
@@ -123,8 +182,101 @@ public sealed class CampaignRunner(
             await EmitAsync(campaign, CampaignMessageLevel.Error, $"Campaign stopped because of an unexpected error: {ex.Message}");
         }
 
+        campaign.ReconcileProgress();
         await db.SaveChangesAsync(CancellationToken.None);
         await NotifyCampaignAsync(campaign);
+    }
+
+    /// <summary>Updates batch counters after one group and schedules the next wait (post, batch or extended delay).</summary>
+    private async Task AfterGroupProcessedAsync(IApplicationDbContext db, Campaign campaign, CampaignTarget target, BatchPacingConfig pacing)
+    {
+        campaign.LastProcessedTargetId = target.Id;
+        campaign.ReconcileProgress();
+
+        if (campaign.RemainingGroupCount == 0)
+        {
+            // Final (possibly partial) batch: count it and close it, but never wait after the last group. Closing it
+            // (next batch number, size 0) means a later resume opens a new batch instead of re-counting this one.
+            campaign.CompletedBatches++;
+            campaign.BatchesSinceExtendedDelay++;
+            campaign.StartBatch(campaign.CurrentBatchNumber + 1, 0);
+            campaign.ClearDelay();
+            await SaveCampaignAsync(db, campaign);
+            return;
+        }
+
+        if (campaign.CurrentBatchProcessed >= campaign.CurrentBatchSize)
+        {
+            await CompleteBatchAndScheduleNextAsync(campaign, pacing);
+        }
+        else
+        {
+            campaign.ScheduleDelay(DelayKind.BetweenPosts, batchDelays.GenerateRandomPostDelay(pacing));
+        }
+        await SaveCampaignAsync(db, campaign);
+    }
+
+    /// <summary>
+    /// Counts the finished batch, decides between the extended break (takes precedence) and the normal batch delay,
+    /// and prepares the next batch, all in one save so a crash can never count a batch twice.
+    /// </summary>
+    private async Task CompleteBatchAndScheduleNextAsync(Campaign campaign, BatchPacingConfig pacing)
+    {
+        var finished = campaign.CurrentBatchNumber;
+        campaign.CompletedBatches++;
+        campaign.BatchesSinceExtendedDelay++;
+
+        var extended = campaign.BatchesSinceExtendedDelay >= pacing.ExtendedDelayAfterBatches;
+        var delay = extended ? batchDelays.GenerateRandomExtendedDelay(pacing) : batchDelays.GenerateRandomBatchDelay(pacing);
+        if (extended)
+        {
+            campaign.BatchesSinceExtendedDelay = 0;
+        }
+
+        campaign.StartBatch(finished + 1, batchDelays.GenerateRandomBatchSize(pacing));
+        campaign.ScheduleDelay(extended ? DelayKind.Extended : DelayKind.BetweenBatches, delay);
+
+        logger.LogInformation("Batch {Batch} completed; {Kind} of {Delay} before batch {Next} ({Size} groups)",
+            finished, extended ? "extended break" : "batch delay", delay, finished + 1, campaign.CurrentBatchSize);
+        await EmitAsync(campaign, CampaignMessageLevel.Success,
+            $"Batch {finished} completed ({campaign.CompletedBatches} completed in total). " +
+            (extended
+                ? $"Extended break after {pacing.ExtendedDelayAfterBatches} batches: {DurationText.Format(delay)}."
+                : $"Break between batches: {DurationText.Format(delay)}.") +
+            $" Next: batch {finished + 1} with {campaign.CurrentBatchSize} group(s).");
+    }
+
+    /// <summary>Waits out the persisted delay (if any) in heartbeat-sized chunks; cancellation interrupts it immediately.</summary>
+    private async Task WaitForScheduledDelayAsync(IApplicationDbContext db, Campaign campaign, CancellationToken ct)
+    {
+        if (campaign.CurrentDelayKind == DelayKind.None || campaign.CurrentDelayEndsAtUtc is not { } endsAt)
+        {
+            return;
+        }
+
+        var remaining = endsAt - DateTime.UtcNow;
+        if (remaining > TimeSpan.Zero)
+        {
+            var kind = campaign.CurrentDelayKind;
+            var interrupted = remaining.TotalSeconds < campaign.CurrentDelaySeconds - 1;
+            await EmitAsync(campaign, CampaignMessageLevel.Info,
+                $"{DurationText.Describe(kind)}: waiting {DurationText.Format(remaining)}" +
+                (interrupted ? $" (remaining part of the {DurationText.Format(TimeSpan.FromSeconds(campaign.CurrentDelaySeconds))} delay)." : "."),
+                until: endsAt);
+            await NotifyCampaignAsync(campaign);
+
+            while (remaining > TimeSpan.Zero)
+            {
+                var chunk = remaining < HeartbeatInterval ? remaining : HeartbeatInterval;
+                await asyncDelay.DelayAsync(chunk, ct);
+                remaining -= chunk;
+                campaign.LastExecutionAtUtc = DateTime.UtcNow;
+                await db.SaveChangesAsync(CancellationToken.None);
+            }
+        }
+
+        campaign.ClearDelay();
+        await SaveCampaignAsync(db, campaign);
     }
 
     private async Task ProcessTargetAsync(
@@ -146,12 +298,14 @@ public sealed class CampaignRunner(
         {
             membership = await automation.CheckMembershipAsync(target.GroupUrl, steps, ct);
         }
-        catch (AutomationHaltedException)
+        catch (Exception ex) when (ex is AutomationHaltedException or OperationCanceledException)
         {
+            // Nothing was posted: the group goes back to Pending and will be processed on resume.
+            target.BatchNumber = null;
             await UpdateTargetAsync(db, campaign, target, TargetStatus.Pending);
             throw;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex)
         {
             logger.LogWarning(ex, "Membership check failed");
             await UpdateTargetAsync(db, campaign, target, TargetStatus.Failed, $"Membership check failed: {ex.Message}");
@@ -209,7 +363,8 @@ public sealed class CampaignRunner(
             }
         }
 
-        // 3. Publishing. The attempt is persisted before Facebook is touched, so a crash can never lead to a silent re-post.
+        // 3. Publishing. The attempt is persisted before Facebook is touched; if the application stops after this
+        //    point the group becomes "Outcome Unknown" and is never retried automatically.
         target.PublishAttempts++;
         await UpdateTargetAsync(db, campaign, target, TargetStatus.Publishing);
 
@@ -246,8 +401,10 @@ public sealed class CampaignRunner(
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            await UpdateTargetAsync(db, campaign, target, TargetStatus.Cancelled,
-                "Cancelled while publishing. Check the group on Facebook to confirm whether the post was created.");
+            // The automation observes cancellation only before clicking Post (the confirmation wait ignores it),
+            // so a cancelled publish never reached Facebook: return the group to Pending for the next resume.
+            target.BatchNumber = null;
+            await UpdateTargetAsync(db, campaign, target, TargetStatus.Pending);
             throw;
         }
         catch (Exception ex)
@@ -292,22 +449,24 @@ public sealed class CampaignRunner(
         return new PublishRequest(content.Text, files, TimeSpan.FromSeconds(settings.UploadTimeoutSeconds));
     }
 
-    private async Task DelayAsync(Campaign campaign, CancellationToken ct)
-    {
-        var seconds = Random.Shared.Next(campaign.MinDelaySeconds, campaign.MaxDelaySeconds + 1);
-        await EmitAsync(campaign, CampaignMessageLevel.Info, $"Waiting {seconds}s before the next group.", until: DateTime.UtcNow.AddSeconds(seconds));
-        await Task.Delay(TimeSpan.FromSeconds(seconds), ct);
-    }
-
+    /// <summary>Saves a group's status immediately (plus the heartbeat) and pushes it to the monitor.</summary>
     private async Task UpdateTargetAsync(IApplicationDbContext db, Campaign campaign, CampaignTarget target, TargetStatus status, string? message = null)
     {
         target.SetStatus(status, message);
+        campaign.LastExecutionAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(CancellationToken.None);
         await notifier.TargetChangedAsync(
             campaign.Id,
             TargetProgressDto.From(target),
             CampaignCountsDto.From(campaign.Targets.Select(t => t.Status)),
             CancellationToken.None);
+    }
+
+    private async Task SaveCampaignAsync(IApplicationDbContext db, Campaign campaign)
+    {
+        campaign.LastExecutionAtUtc = DateTime.UtcNow;
+        await db.SaveChangesAsync(CancellationToken.None);
+        await NotifyCampaignAsync(campaign);
     }
 
     private Task EmitAsync(Campaign campaign, CampaignMessageLevel level, string text, CampaignTarget? target = null, DateTime? until = null) =>

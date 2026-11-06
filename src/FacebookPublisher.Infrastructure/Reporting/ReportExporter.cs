@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text;
 using ClosedXML.Excel;
 using FacebookPublisher.Application.Abstractions;
+using FacebookPublisher.Application.Campaigns;
 using FacebookPublisher.Application.Common;
 using FacebookPublisher.Application.Reports;
 
@@ -140,13 +141,18 @@ public sealed class ReportExporter : IReportExporter
         yield return ("Created", Format(report.CreatedAtUtc));
         yield return ("Started", Format(report.StartedAtUtc));
         yield return ("Completed", Format(report.CompletedAtUtc));
-        yield return ("Delay Between Groups", $"{report.MinDelaySeconds}–{report.MaxDelaySeconds} seconds");
+        yield return ("Batch Size", $"{report.Pacing.MinBatchSize}–{report.Pacing.MaxBatchSize} groups");
+        yield return ("Delay Between Posts", DurationText.Format(report.Pacing.PostDelay));
+        yield return ("Delay Between Batches", DurationText.Format(report.Pacing.BatchDelay));
+        yield return ("Extended Delay", $"{DurationText.Format(report.Pacing.ExtendedDelay)} after every {report.Pacing.ExtendedDelayAfterBatches} batches");
+        yield return ("Completed Batches", report.CompletedBatches.ToString(CultureInfo.InvariantCulture));
         yield return ("Manual Approval", report.RequireApproval ? "Yes" : "No");
         yield return ("Total Groups Provided", report.Counts.Total.ToString(CultureInfo.InvariantCulture));
         yield return ("Published Successfully", report.Counts.Published.ToString(CultureInfo.InvariantCulture));
         yield return ("Skipped", report.Counts.Skipped.ToString(CultureInfo.InvariantCulture));
         yield return ("Inaccessible", report.Counts.Inaccessible.ToString(CultureInfo.InvariantCulture));
         yield return ("Failed", report.Counts.Failed.ToString(CultureInfo.InvariantCulture));
+        yield return ("Outcome Unknown", report.Counts.OutcomeUnknown.ToString(CultureInfo.InvariantCulture));
         yield return ("Cancelled", report.Counts.Cancelled.ToString(CultureInfo.InvariantCulture));
         yield return ("Not Yet Processed", report.Counts.Remaining.ToString(CultureInfo.InvariantCulture));
         yield return ("Report Generated", Format(report.GeneratedAtUtc));
