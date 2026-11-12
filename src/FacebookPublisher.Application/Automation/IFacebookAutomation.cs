@@ -3,12 +3,24 @@ using FacebookPublisher.Domain.Enums;
 namespace FacebookPublisher.Application.Automation;
 
 /// <summary>
-/// Browser automation boundary. Implementations drive a browser profile the user logged into manually;
-/// they never handle credentials and must throw <see cref="AutomationHaltedException"/> whenever Facebook
-/// signals that automation should stop.
+/// Hands out the browser automation of one application user. Each user has an independent persistent browser
+/// profile (their own Facebook login); an instance never touches another user's profile.
+/// </summary>
+public interface IFacebookAutomationFactory
+{
+    IFacebookAutomation ForUser(Guid ownerId);
+}
+
+/// <summary>
+/// Browser automation boundary for one application user. Implementations drive a browser profile that user logged
+/// into manually; they never handle credentials and must throw <see cref="AutomationHaltedException"/> whenever
+/// Facebook signals that automation should stop.
 /// </summary>
 public interface IFacebookAutomation
 {
+    /// <summary>The application user whose browser profile this instance drives.</summary>
+    Guid OwnerId { get; }
+
     bool IsBrowserOpen { get; }
 
     Task<SessionStatus> CheckSessionAsync(CancellationToken cancellationToken);
@@ -38,6 +50,9 @@ public interface IFacebookAutomation
 
     /// <summary>Closes the browser so it is relaunched with current settings on next use.</summary>
     Task CloseBrowserAsync();
+
+    /// <summary>Disconnects Facebook: closes the browser and deletes this user's browser profile (cookies, storage).</summary>
+    Task ResetSessionAsync();
 }
 
 public sealed record SessionStatus(bool IsLoggedIn, string Message, DateTime CheckedAtUtc);

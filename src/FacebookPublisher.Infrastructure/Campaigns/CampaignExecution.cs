@@ -35,38 +35,45 @@ public sealed class CampaignQueue : ICampaignQueue
         _channel.Reader.ReadAllAsync(cancellationToken);
 }
 
+/// <summary>
+/// Running campaigns of this process. Different users' campaigns run at the same time; each user has at most one
+/// running campaign because a browser profile can only be used by one browser process.
+/// </summary>
 public sealed class CampaignExecutionTracker : ICampaignExecutionTracker
 {
     private readonly Lock _lock = new();
-    private Guid? _activeId;
-    private CancellationTokenSource? _cts;
+    private readonly Dictionary<Guid, (Guid OwnerId, CancellationTokenSource Cts)> _running = [];
 
     public Guid InstanceId { get; } = Guid.NewGuid();
 
     public DateTime StartedAtUtc { get; } = DateTime.UtcNow;
 
-    public Guid? ActiveCampaignId
+    public IReadOnlyCollection<Guid> RunningCampaignIds
     {
         get
         {
             lock (_lock)
             {
-                return _activeId;
+                return _running.Keys.ToList();
             }
         }
     }
 
-    public CancellationToken Begin(Guid campaignId, CancellationToken hostStoppingToken)
+    public CancellationToken Begin(Guid campaignId, Guid ownerId, CancellationToken hostStoppingToken)
     {
         lock (_lock)
         {
-            if (_activeId is not null)
+            if (_running.ContainsKey(campaignId))
             {
-                throw new InvalidOperationException($"Campaign {_activeId} is already running.");
+                throw new InvalidOperationException($"Campaign {campaignId} is already running.");
             }
-            _activeId = campaignId;
-            _cts = CancellationTokenSource.CreateLinkedTokenSource(hostStoppingToken);
-            return _cts.Token;
+            if (_running.Values.Any(r => r.OwnerId == ownerId))
+            {
+                throw new InvalidOperationException($"User {ownerId} already has a running campaign.");
+            }
+            var cts = CancellationTokenSource.CreateLinkedTokenSource(hostStoppingToken);
+            _running[campaignId] = (ownerId, cts);
+            return cts.Token;
         }
     }
 
@@ -74,12 +81,25 @@ public sealed class CampaignExecutionTracker : ICampaignExecutionTracker
     {
         lock (_lock)
         {
-            if (_activeId != campaignId || _cts is null)
+            if (!_running.TryGetValue(campaignId, out var run))
             {
                 return false;
             }
-            _cts.Cancel();
+            run.Cts.Cancel();
             return true;
+        }
+    }
+
+    public int RequestCancelForOwner(Guid ownerId)
+    {
+        lock (_lock)
+        {
+            var runs = _running.Values.Where(r => r.OwnerId == ownerId).ToList();
+            foreach (var run in runs)
+            {
+                run.Cts.Cancel();
+            }
+            return runs.Count;
         }
     }
 
@@ -87,13 +107,26 @@ public sealed class CampaignExecutionTracker : ICampaignExecutionTracker
     {
         lock (_lock)
         {
-            if (_activeId != campaignId)
+            if (_running.Remove(campaignId, out var run))
             {
-                return;
+                run.Cts.Dispose();
             }
-            _cts?.Dispose();
-            _cts = null;
-            _activeId = null;
+        }
+    }
+
+    public bool IsRunning(Guid campaignId)
+    {
+        lock (_lock)
+        {
+            return _running.ContainsKey(campaignId);
+        }
+    }
+
+    public bool IsOwnerBusy(Guid ownerId)
+    {
+        lock (_lock)
+        {
+            return _running.Values.Any(r => r.OwnerId == ownerId);
         }
     }
 }

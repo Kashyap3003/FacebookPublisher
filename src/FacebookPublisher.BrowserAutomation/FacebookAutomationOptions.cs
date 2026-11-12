@@ -12,6 +12,12 @@ public sealed class FacebookAutomationOptions
 
     public string LoginUrl { get; set; } = "https://www.facebook.com/login";
 
+    /// <summary>
+    /// Folder holding one persistent browser profile per application user ({root}/{userId}). Absolute, or relative to
+    /// the application content root. Keep it outside wwwroot: profiles contain Facebook session cookies.
+    /// </summary>
+    public string BrowserProfilesRoot { get; set; } = "App_Data/BrowserProfiles";
+
     /// <summary>Cookie set by Facebook only for a logged-in session.</summary>
     public string SessionCookieName { get; set; } = "c_user";
 

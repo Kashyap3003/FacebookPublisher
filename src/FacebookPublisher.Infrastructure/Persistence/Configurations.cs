@@ -1,5 +1,6 @@
 using FacebookPublisher.Domain.Entities;
 using FacebookPublisher.Domain.Enums;
+using FacebookPublisher.Infrastructure.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 
@@ -13,8 +14,10 @@ internal sealed class FacebookGroupConfiguration : IEntityTypeConfiguration<Face
         builder.Property(g => g.Name).HasMaxLength(200).IsRequired();
         builder.Property(g => g.Url).HasMaxLength(300).IsRequired();
         builder.Property(g => g.Notes).HasMaxLength(1000);
-        builder.HasIndex(g => g.Url).IsUnique();
+        // Each user has their own list: the same group may be saved by several users, but only once per user.
+        builder.HasIndex(g => new { g.OwnerId, g.Url }).IsUnique();
         builder.HasIndex(g => g.Name);
+        builder.HasOne<ApplicationUser>().WithMany().HasForeignKey(g => g.OwnerId).OnDelete(DeleteBehavior.Restrict);
     }
 }
 
@@ -23,6 +26,8 @@ internal sealed class ContentPostConfiguration : IEntityTypeConfiguration<Conten
     public void Configure(EntityTypeBuilder<ContentPost> builder)
     {
         builder.ToTable("ContentPosts");
+        builder.HasIndex(c => c.OwnerId);
+        builder.HasOne<ApplicationUser>().WithMany().HasForeignKey(c => c.OwnerId).OnDelete(DeleteBehavior.Restrict);
         builder.Property(c => c.Title).HasMaxLength(200).IsRequired();
         builder.Property(c => c.Text).HasMaxLength(20_000);
         builder.Property(c => c.ContentHash).HasMaxLength(64).IsRequired();
@@ -51,6 +56,8 @@ internal sealed class CampaignConfiguration : IEntityTypeConfiguration<Campaign>
     public void Configure(EntityTypeBuilder<Campaign> builder)
     {
         builder.ToTable("Campaigns");
+        builder.HasIndex(c => new { c.OwnerId, c.Status });
+        builder.HasOne<ApplicationUser>().WithMany().HasForeignKey(c => c.OwnerId).OnDelete(DeleteBehavior.Restrict);
         builder.Property(c => c.Name).HasMaxLength(200).IsRequired();
         builder.Property(c => c.StatusReason).HasMaxLength(2000);
         builder.Property(c => c.RowVersion).IsRowVersion();
@@ -103,8 +110,11 @@ internal sealed class PublisherSettingsConfiguration : IEntityTypeConfiguration<
     public void Configure(EntityTypeBuilder<PublisherSettings> builder)
     {
         builder.ToTable("PublisherSettings");
-        builder.Property(s => s.Id).ValueGeneratedNever();
-        builder.Property(s => s.BrowserProfilePath).HasMaxLength(500).IsRequired();
+        // One settings row per user, keyed by the owner id (never generated).
+        builder.HasKey(s => s.OwnerId);
+        builder.Property(s => s.OwnerId).ValueGeneratedNever();
+        builder.HasOne<ApplicationUser>().WithOne().HasForeignKey<PublisherSettings>(s => s.OwnerId).OnDelete(DeleteBehavior.Restrict);
+        builder.Property(s => s.LegacyBrowserProfilePath).HasMaxLength(500);
         builder.Property(s => s.BrowserChannel).HasMaxLength(40);
         builder.OwnsOne(s => s.Pacing, PacingMapping.Configure);
         builder.Navigation(s => s.Pacing).IsRequired();
@@ -141,5 +151,13 @@ internal static class PacingMapping
             range.Property(r => r.Unit).HasDefaultValue(unit);
         });
         pacing.Navigation(navigation).IsRequired();
+    }
+}
+
+internal sealed class ApplicationUserConfiguration : IEntityTypeConfiguration<ApplicationUser>
+{
+    public void Configure(EntityTypeBuilder<ApplicationUser> builder)
+    {
+        builder.Property(u => u.DisplayName).HasMaxLength(200);
     }
 }

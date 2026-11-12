@@ -1,5 +1,7 @@
 using FacebookPublisher.Application.Common;
+using FacebookPublisher.Web.Identity;
 using Microsoft.AspNetCore.Components;
+using Microsoft.AspNetCore.Components.Authorization;
 
 namespace FacebookPublisher.Web.Components.Shared;
 
@@ -7,6 +9,12 @@ namespace FacebookPublisher.Web.Components.Shared;
 public abstract class AppComponentBase : ComponentBase
 {
     [Inject] protected ILogger<AppComponentBase> Logger { get; set; } = default!;
+
+    [CascadingParameter] private Task<AuthenticationState>? AuthenticationState { get; set; }
+
+    /// <summary>The signed-in user's id, used to ignore live events that belong to other users.</summary>
+    protected async Task<Guid?> GetCurrentUserIdAsync() =>
+        AuthenticationState is null ? null : UserClaims.GetUserId((await AuthenticationState).User);
 
     protected bool Busy { get; private set; }
 
@@ -52,6 +60,10 @@ public abstract class AppComponentBase : ComponentBase
         catch (FacebookPublisher.Application.Automation.AutomationHaltedException ex)
         {
             Errors = [ex.Message];
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            Errors = [$"{ex.Message} Please sign in again."];
         }
         catch (Exception ex)
         {

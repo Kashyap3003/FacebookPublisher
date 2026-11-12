@@ -1,8 +1,8 @@
 @page "/groups"
 @inherits AppComponentBase
 @inject GroupService GroupService
+@inject CampaignService CampaignService
 @inject IJSRuntime JS
-@inject FacebookPublisher.Application.Abstractions.ICampaignExecutionTracker Tracker
 
 <PageTitle>Facebook Groups · Group Publisher</PageTitle>
 
@@ -141,7 +141,7 @@
                                     </td>
                                     <td class="text-end text-nowrap">
                                         <button class="btn btn-sm btn-outline-secondary btn-icon" title="Check access in the browser (never joins)"
-                                                disabled="@(Busy || Tracker.ActiveCampaignId is not null)" @onclick="() => VerifyAsync(g)">
+                                                disabled="@(Busy || _myCampaignRunning)" @onclick="() => VerifyAsync(g)">
                                             @if (_verifyingId == g.Id)
                                             {
                                                 <i class="bi bi-arrow-repeat spin"></i>
@@ -218,9 +218,15 @@
         ? _groups
         : _groups.Where(g => g.Name.Contains(_search, StringComparison.OrdinalIgnoreCase) || g.Url.Contains(_search, StringComparison.OrdinalIgnoreCase));
 
-    protected override async Task OnInitializedAsync() => await LoadAsync();
+    private bool _myCampaignRunning;
 
-    private async Task LoadAsync() => _groups = (await GroupService.ListAsync()).ToList();
+    protected override async Task OnInitializedAsync() => await RunAsync(LoadAsync);
+
+    private async Task LoadAsync()
+    {
+        _groups = (await GroupService.ListAsync()).ToList();
+        _myCampaignRunning = await CampaignService.HasRunningCampaignAsync();
+    }
 
     private async Task AddAsync()
     {

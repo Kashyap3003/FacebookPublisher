@@ -19,8 +19,13 @@ namespace FacebookPublisher.Tests;
 public class BatchExecutionTests : IAsyncLifetime
 {
     private SqlTestDatabase _db = null!;
+    private Guid _user;
 
-    public async Task InitializeAsync() => _db = await SqlTestDatabase.CreateAsync();
+    public async Task InitializeAsync()
+    {
+        _db = await SqlTestDatabase.CreateAsync();
+        _user = await _db.CreateUserAsync("user-a@example.test");
+    }
 
     public async Task DisposeAsync() => await _db.DisposeAsync();
 
@@ -30,7 +35,7 @@ public class BatchExecutionTests : IAsyncLifetime
     public async Task Post_batch_and_extended_delays_are_applied_in_the_right_order_with_no_delay_after_the_last_group()
     {
         var groups = await SeedAsync(10);
-        var app = new AppProcess(_db, FixedRandom.AlwaysMin());
+        var app = new AppProcess(_db, _user, FixedRandom.AlwaysMin());
         var id = await app.CreateAsync(groups, Pacing(minBatch: 3, maxBatch: 5, extendedAfter: 2));
 
         await app.RunQueuedAsync();
@@ -50,7 +55,7 @@ public class BatchExecutionTests : IAsyncLifetime
     public async Task Partial_final_batch_is_processed_and_counted_without_a_trailing_batch_delay()
     {
         var groups = await SeedAsync(7);
-        var app = new AppProcess(_db, FixedRandom.AlwaysMax());
+        var app = new AppProcess(_db, _user, FixedRandom.AlwaysMax());
         var id = await app.CreateAsync(groups, Pacing(minBatch: 3, maxBatch: 5));
 
         await app.RunQueuedAsync();
@@ -70,7 +75,7 @@ public class BatchExecutionTests : IAsyncLifetime
     public async Task Stop_interrupts_a_long_delay_immediately_and_resume_waits_only_the_remaining_part()
     {
         var groups = await SeedAsync(3);
-        var app = new AppProcess(_db, FixedRandom.AlwaysMin(), new TaskAsyncDelay()); // real Task.Delay
+        var app = new AppProcess(_db, _user, FixedRandom.AlwaysMin(), new TaskAsyncDelay()); // real Task.Delay
         var id = await app.CreateAsync(groups, Pacing(minBatch: 1, maxBatch: 1));
 
         var stopper = Task.Run(async () =>
@@ -99,7 +104,7 @@ public class BatchExecutionTests : IAsyncLifetime
         Assert.True(stopped.CurrentDelayEndsAtUtc > DateTime.UtcNow.AddMinutes(14));
 
         // Restart + manual Resume: the rest of the interrupted break is waited first, then batches 2 and 3.
-        var restarted = new AppProcess(_db, FixedRandom.AlwaysMin());
+        var restarted = new AppProcess(_db, _user, FixedRandom.AlwaysMin());
         await restarted.Service.ResumeAsync(id);
         await restarted.RunQueuedAsync();
 
@@ -116,7 +121,7 @@ public class BatchExecutionTests : IAsyncLifetime
     public async Task Stop_during_a_post_delay_preserves_progress_and_resume_finishes_the_same_batch_without_double_counting()
     {
         var groups = await SeedAsync(6);
-        var app = new AppProcess(_db, FixedRandom.AlwaysMin());
+        var app = new AppProcess(_db, _user, FixedRandom.AlwaysMin());
         var id = await app.CreateAsync(groups, Pacing(minBatch: 3, maxBatch: 3));
         app.Delay.OnDelay = async (_, _) => await app.Service.StopAsync(id); // Stop during the first wait (a post delay)
 
@@ -128,7 +133,7 @@ public class BatchExecutionTests : IAsyncLifetime
         Assert.Equal((1, 3, 1, 0), (stopped.CurrentBatchNumber, stopped.CurrentBatchSize, stopped.CurrentBatchProcessed, stopped.CompletedBatches));
         Assert.Equal(DelayKind.BetweenPosts, stopped.CurrentDelayKind);
 
-        var restarted = new AppProcess(_db, FixedRandom.AlwaysMin());
+        var restarted = new AppProcess(_db, _user, FixedRandom.AlwaysMin());
         await restarted.Service.ResumeAsync(id);
         await restarted.RunQueuedAsync();
 
@@ -143,7 +148,7 @@ public class BatchExecutionTests : IAsyncLifetime
     public async Task Stop_during_an_extended_break_keeps_the_extended_counter_consistent_after_resume()
     {
         var groups = await SeedAsync(8);
-        var app = new AppProcess(_db, FixedRandom.AlwaysMin());
+        var app = new AppProcess(_db, _user, FixedRandom.AlwaysMin());
         var id = await app.CreateAsync(groups, Pacing(minBatch: 2, maxBatch: 2, extendedAfter: 2));
         app.Delay.OnDelay = async (_, _) =>
         {
@@ -160,7 +165,7 @@ public class BatchExecutionTests : IAsyncLifetime
         Assert.Equal((2, 0, 3), (stopped.CompletedBatches, stopped.BatchesSinceExtendedDelay, stopped.CurrentBatchNumber));
         Assert.Equal(DelayKind.Extended, stopped.CurrentDelayKind);
 
-        var restarted = new AppProcess(_db, FixedRandom.AlwaysMin());
+        var restarted = new AppProcess(_db, _user, FixedRandom.AlwaysMin());
         await restarted.Service.ResumeAsync(id);
         await restarted.RunQueuedAsync();
 
@@ -177,7 +182,7 @@ public class BatchExecutionTests : IAsyncLifetime
     public async Task Hundred_groups_stop_after_sixty_restart_and_resume_processes_only_the_remaining_forty()
     {
         var groups = await SeedAsync(100);
-        var first = new AppProcess(_db, new SystemRandomSource());
+        var first = new AppProcess(_db, _user, new SystemRandomSource());
         var id = await first.CreateAsync(groups, new BatchPacingConfig()); // defaults: 5–9 groups per batch
         var published = 0;
         first.Automation.AfterPublish = async _ =>
@@ -204,7 +209,7 @@ public class BatchExecutionTests : IAsyncLifetime
         Assert.Equal(60, firstRunUrls.Count);
 
         // The application restarts (new process, nothing in memory) and the user manually clicks Resume.
-        var second = new AppProcess(_db, new SystemRandomSource());
+        var second = new AppProcess(_db, _user, new SystemRandomSource());
         await second.Service.ResumeAsync(id);
         Assert.Single(second.Queue.Enqueued);
         await second.RunQueuedAsync();
@@ -230,11 +235,11 @@ public class BatchExecutionTests : IAsyncLifetime
     public async Task Crash_mid_publish_marks_outcome_unknown_and_resume_never_retries_it_until_verified()
     {
         var groups = await SeedAsync(6);
-        var crashed = new AppProcess(_db, FixedRandom.AlwaysMin());
+        var crashed = new AppProcess(_db, _user, FixedRandom.AlwaysMin());
         var id = await crashed.CreateAsync(groups, Pacing(minBatch: 9, maxBatch: 9), start: false);
 
         // Simulate the database left behind by a process that died: 2 published, 2 mid-publish, 1 mid-check, 1 pending.
-        await using (var db = _db.CreateContext())
+        await using (var db = await _db.CreateContextAsync())
         {
             var c = await db.Campaigns.Include(x => x.Targets).FirstAsync(x => x.Id == id);
             var t = c.Targets.OrderBy(x => x.Order).ToList();
@@ -255,7 +260,7 @@ public class BatchExecutionTests : IAsyncLifetime
             await db.SaveChangesAsync();
         }
 
-        var app = new AppProcess(_db, FixedRandom.AlwaysMin());
+        var app = new AppProcess(_db, _user, FixedRandom.AlwaysMin());
         Assert.Equal(1, await app.Service.ReconcileOrphanedCampaignsAsync());
 
         var recovered = await ReadAsync(id);
@@ -278,7 +283,7 @@ public class BatchExecutionTests : IAsyncLifetime
         Assert.Equal(TargetStatus.Pending, verified.Targets.Single(x => x.Id == targets[3].Id).Status);
         Assert.True(verified.CanBeResumed);
 
-        var next = new AppProcess(_db, FixedRandom.AlwaysMin());
+        var next = new AppProcess(_db, _user, FixedRandom.AlwaysMin());
         await next.Service.ResumeAsync(id);
         await next.RunQueuedAsync();
         Assert.Equal([targets[3].GroupUrl], next.Automation.PublishedTo); // only the group confirmed as not published
@@ -291,11 +296,11 @@ public class BatchExecutionTests : IAsyncLifetime
     public async Task Startup_does_not_resume_anything_and_unknown_outcomes_need_a_stopped_campaign_to_verify()
     {
         var groups = await SeedAsync(2);
-        var app = new AppProcess(_db, FixedRandom.AlwaysMin());
+        var app = new AppProcess(_db, _user, FixedRandom.AlwaysMin());
         var id = await app.CreateAsync(groups, Pacing(minBatch: 2, maxBatch: 2)); // queued, never run
 
         // Restart: the new process neither runs nor re-queues it; opening the app marks it Interrupted.
-        var restarted = new AppProcess(_db, FixedRandom.AlwaysMin());
+        var restarted = new AppProcess(_db, _user, FixedRandom.AlwaysMin());
         Assert.Empty(restarted.Queue.Enqueued);
         await restarted.Service.ReconcileOrphanedCampaignsAsync();
         var campaign = await ReadAsync(id);
@@ -310,7 +315,7 @@ public class BatchExecutionTests : IAsyncLifetime
     public async Task Two_simultaneous_resume_requests_queue_the_campaign_only_once()
     {
         var groups = await SeedAsync(4);
-        var app = new AppProcess(_db, FixedRandom.AlwaysMin());
+        var app = new AppProcess(_db, _user, FixedRandom.AlwaysMin());
         var id = await app.CreateAsync(groups, Pacing(minBatch: 2, maxBatch: 2));
         await app.Service.StopAsync(id); // queued → stopped
         Assert.Equal(CampaignStatus.Stopped, (await ReadAsync(id)).Status);
@@ -336,7 +341,7 @@ public class BatchExecutionTests : IAsyncLifetime
     public async Task Two_runners_racing_for_the_same_campaign_publish_each_group_exactly_once()
     {
         var groups = await SeedAsync(5);
-        var app = new AppProcess(_db, FixedRandom.AlwaysMin());
+        var app = new AppProcess(_db, _user, FixedRandom.AlwaysMin());
         var id = await app.CreateAsync(groups, Pacing(minBatch: 5, maxBatch: 5));
         var other = app.NewRunner(new CampaignRunnerTests.FakeAutomation());
 
@@ -354,11 +359,11 @@ public class BatchExecutionTests : IAsyncLifetime
     public async Task Completed_campaign_cannot_be_started_or_resumed_again()
     {
         var groups = await SeedAsync(3);
-        var app = new AppProcess(_db, FixedRandom.AlwaysMin());
+        var app = new AppProcess(_db, _user, FixedRandom.AlwaysMin());
         var id = await app.CreateAsync(groups, Pacing(minBatch: 3, maxBatch: 3));
         await app.RunQueuedAsync();
 
-        var reopened = new AppProcess(_db, FixedRandom.AlwaysMin());
+        var reopened = new AppProcess(_db, _user, FixedRandom.AlwaysMin());
         await Assert.ThrowsAsync<AppValidationException>(() => reopened.Service.ResumeAsync(id));
         await Assert.ThrowsAsync<AppValidationException>(() => reopened.Service.StartAsync(id));
         Assert.Empty(reopened.Queue.Enqueued);
@@ -369,7 +374,7 @@ public class BatchExecutionTests : IAsyncLifetime
     public async Task Saved_campaign_starts_only_when_the_user_clicks_start()
     {
         var groups = await SeedAsync(2);
-        var app = new AppProcess(_db, FixedRandom.AlwaysMin());
+        var app = new AppProcess(_db, _user, FixedRandom.AlwaysMin());
         var id = await app.CreateAsync(groups, Pacing(minBatch: 2, maxBatch: 2), start: false);
 
         Assert.Empty(app.Queue.Enqueued);
@@ -386,7 +391,7 @@ public class BatchExecutionTests : IAsyncLifetime
     [Fact]
     public async Task Settings_persist_reload_and_reject_invalid_values()
     {
-        var settings = new SettingsService(_db, NullLogger<SettingsService>.Instance);
+        var settings = new SettingsService(_db.For(_user), NullLogger<SettingsService>.Instance);
         var model = await settings.GetAsync();
         model.Pacing = new BatchPacingConfig
         {
@@ -399,7 +404,7 @@ public class BatchExecutionTests : IAsyncLifetime
         };
         await settings.SaveAsync(model);
 
-        var reloaded = (await new SettingsService(_db, NullLogger<SettingsService>.Instance).GetAsync()).Pacing;
+        var reloaded = (await new SettingsService(_db.For(_user), NullLogger<SettingsService>.Instance).GetAsync()).Pacing;
         Assert.Equal((4, 11, 3), (reloaded.MinBatchSize, reloaded.MaxBatchSize, reloaded.ExtendedDelayAfterBatches));
         Assert.Equal((1, 2, DelayUnit.Minutes), (reloaded.PostDelay.Min, reloaded.PostDelay.Max, reloaded.PostDelay.Unit));
         Assert.Equal((1, 2, DelayUnit.Hours), (reloaded.BatchDelay.Min, reloaded.BatchDelay.Max, reloaded.BatchDelay.Unit));
@@ -414,10 +419,10 @@ public class BatchExecutionTests : IAsyncLifetime
     public async Task Changing_global_settings_does_not_change_an_existing_campaign_snapshot()
     {
         var groups = await SeedAsync(2);
-        var app = new AppProcess(_db, FixedRandom.AlwaysMin());
+        var app = new AppProcess(_db, _user, FixedRandom.AlwaysMin());
         var id = await app.CreateAsync(groups, Pacing(minBatch: 2, maxBatch: 2), start: false);
 
-        var settings = new SettingsService(_db, NullLogger<SettingsService>.Instance);
+        var settings = new SettingsService(_db.For(_user), NullLogger<SettingsService>.Instance);
         var model = await settings.GetAsync();
         model.Pacing.MinBatchSize = 7;
         model.Pacing.MaxBatchSize = 8;
@@ -481,25 +486,26 @@ public class BatchExecutionTests : IAsyncLifetime
 
     private async Task<Campaign> ReadAsync(Guid id)
     {
-        await using var db = _db.CreateContext();
+        await using var db = await _db.CreateContextAsync();
         return await db.Campaigns.AsNoTracking().Include(c => c.Targets).FirstAsync(c => c.Id == id);
     }
 
     private async Task<(Guid ContentId, List<Guid> GroupIds)> SeedAsync(int groupCount)
     {
-        await using var db = _db.CreateContext();
-        if (!await db.Settings.AnyAsync())
+        await using var db = await _db.CreateContextAsync();
+        if (!await db.Settings.AnyAsync(s => s.OwnerId == _user))
         {
             var settings = SettingsService.CreateDefaults();
+            settings.OwnerId = _user;
             settings.MaxGroupsPerCampaign = 200;
             db.Settings.Add(settings);
         }
-        var content = new ContentPost { Title = $"Post {Guid.NewGuid():N}", Text = "Hello groups", ContentHash = Guid.NewGuid().ToString("N") };
+        var content = new ContentPost { OwnerId = _user, Title = $"Post {Guid.NewGuid():N}", Text = "Hello groups", ContentHash = Guid.NewGuid().ToString("N") };
         db.Contents.Add(content);
         var ids = new List<Guid>();
         for (var i = 1; i <= groupCount; i++)
         {
-            var group = new FacebookGroup { Name = $"Group {i:000}", Url = $"https://www.facebook.com/groups/test{i:000}-{content.Id:N}" };
+            var group = new FacebookGroup { OwnerId = _user, Name = $"Group {i:000}", Url = $"https://www.facebook.com/groups/test{i:000}-{content.Id:N}" };
             db.Groups.Add(group);
             ids.Add(group.Id);
         }
@@ -507,63 +513,4 @@ public class BatchExecutionTests : IAsyncLifetime
         return (content.Id, ids);
     }
 
-    /// <summary>One run of the application: its own instance id, queue, browser and in-memory state.</summary>
-    private sealed class AppProcess
-    {
-        private readonly SqlTestDatabase _db;
-        private readonly IRandomSource _random;
-        private readonly IAsyncDelay? _realDelay;
-
-        public AppProcess(SqlTestDatabase db, IRandomSource random, IAsyncDelay? realDelay = null)
-        {
-            _db = db;
-            _random = random;
-            _realDelay = realDelay;
-            Service = NewService();
-            Runner = CreateRunner(Automation);
-        }
-
-        public CampaignExecutionTracker Tracker { get; } = new();
-
-        public RecordingQueue Queue { get; } = new();
-
-        public CampaignRunnerTests.FakeAutomation Automation { get; } = new();
-
-        public CampaignRunnerTests.RecordingNotifier Notifier { get; } = new();
-
-        public RecordingDelay Delay { get; } = new();
-
-        public CampaignService Service { get; }
-
-        public CampaignRunner Runner { get; }
-
-        public CampaignService NewService() => new(_db, Queue, Tracker, new CampaignApprovalGate(), Notifier, NullLogger<CampaignService>.Instance);
-
-        public (CampaignRunner Runner, CampaignRunnerTests.FakeAutomation Automation) NewRunner(CampaignRunnerTests.FakeAutomation automation) =>
-            (CreateRunner(automation), automation);
-
-        public Task<Guid> CreateAsync((Guid ContentId, List<Guid> GroupIds) seed, BatchPacingConfig pacing, bool start = true) =>
-            Service.CreateAsync(new CreateCampaignRequest("Marketing Campaign 01", seed.ContentId, seed.GroupIds, pacing, false), start);
-
-        /// <summary>Does what CampaignWorker does for each queued campaign.</summary>
-        public async Task RunQueuedAsync()
-        {
-            while (Queue.Enqueued.TryDequeue(out var id))
-            {
-                var token = Tracker.Begin(id, CancellationToken.None);
-                try
-                {
-                    await Runner.RunAsync(id, token, CancellationToken.None);
-                }
-                finally
-                {
-                    Tracker.End(id);
-                }
-            }
-        }
-
-        private CampaignRunner CreateRunner(CampaignRunnerTests.FakeAutomation automation) => new(
-            _db, automation, new CampaignRunnerTests.FakeStorage(), new CampaignApprovalGate(), Notifier,
-            new BatchDelayService(_random), _realDelay ?? Delay, Tracker, NullLogger<CampaignRunner>.Instance);
-    }
 }

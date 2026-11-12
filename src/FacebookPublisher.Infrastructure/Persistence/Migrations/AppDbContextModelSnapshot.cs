@@ -77,6 +77,9 @@ namespace FacebookPublisher.Infrastructure.Persistence.Migrations
                         .HasMaxLength(200)
                         .HasColumnType("nvarchar(200)");
 
+                    b.Property<Guid>("OwnerId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<int>("RemainingGroupCount")
                         .HasColumnType("int");
 
@@ -111,6 +114,8 @@ namespace FacebookPublisher.Infrastructure.Persistence.Migrations
                     b.HasIndex("CreatedAtUtc");
 
                     b.HasIndex("Status");
+
+                    b.HasIndex("OwnerId", "Status");
 
                     b.ToTable("Campaigns", (string)null);
                 });
@@ -253,6 +258,9 @@ namespace FacebookPublisher.Infrastructure.Persistence.Migrations
                     b.Property<DateTime>("CreatedAtUtc")
                         .HasColumnType("datetime2");
 
+                    b.Property<Guid>("OwnerId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<string>("Text")
                         .HasMaxLength(20000)
                         .HasColumnType("nvarchar(max)");
@@ -268,6 +276,8 @@ namespace FacebookPublisher.Infrastructure.Persistence.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("ContentHash");
+
+                    b.HasIndex("OwnerId");
 
                     b.ToTable("ContentPosts", (string)null);
                 });
@@ -301,6 +311,9 @@ namespace FacebookPublisher.Infrastructure.Persistence.Migrations
                         .HasMaxLength(1000)
                         .HasColumnType("nvarchar(1000)");
 
+                    b.Property<Guid>("OwnerId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<DateTime>("UpdatedAtUtc")
                         .HasColumnType("datetime2");
 
@@ -313,7 +326,7 @@ namespace FacebookPublisher.Infrastructure.Persistence.Migrations
 
                     b.HasIndex("Name");
 
-                    b.HasIndex("Url")
+                    b.HasIndex("OwnerId", "Url")
                         .IsUnique();
 
                     b.ToTable("FacebookGroups", (string)null);
@@ -321,8 +334,8 @@ namespace FacebookPublisher.Infrastructure.Persistence.Migrations
 
             modelBuilder.Entity("FacebookPublisher.Domain.Entities.PublisherSettings", b =>
                 {
-                    b.Property<int>("Id")
-                        .HasColumnType("int");
+                    b.Property<Guid>("OwnerId")
+                        .HasColumnType("uniqueidentifier");
 
                     b.Property<int>("ApprovalTimeoutMinutes")
                         .HasColumnType("int");
@@ -332,16 +345,15 @@ namespace FacebookPublisher.Infrastructure.Persistence.Migrations
                         .HasMaxLength(40)
                         .HasColumnType("nvarchar(40)");
 
-                    b.Property<string>("BrowserProfilePath")
-                        .IsRequired()
-                        .HasMaxLength(500)
-                        .HasColumnType("nvarchar(500)");
-
                     b.Property<int>("DuplicateWindowHours")
                         .HasColumnType("int");
 
                     b.Property<bool>("Headless")
                         .HasColumnType("bit");
+
+                    b.Property<string>("LegacyBrowserProfilePath")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
 
                     b.Property<int>("MaxGroupsPerCampaign")
                         .HasColumnType("int");
@@ -364,9 +376,222 @@ namespace FacebookPublisher.Infrastructure.Persistence.Migrations
                     b.Property<int>("UploadTimeoutSeconds")
                         .HasColumnType("int");
 
-                    b.HasKey("Id");
+                    b.HasKey("OwnerId");
 
                     b.ToTable("PublisherSettings", (string)null);
+                });
+
+            modelBuilder.Entity("FacebookPublisher.Infrastructure.Identity.ApplicationUser", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("AccessFailedCount")
+                        .HasColumnType("int");
+
+                    b.Property<string>("ConcurrencyStamp")
+                        .IsConcurrencyToken()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("DisplayName")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("Email")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<bool>("EmailConfirmed")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("IsDisabled")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("IsLegacyOwner")
+                        .HasColumnType("bit");
+
+                    b.Property<DateTime?>("LastLoginAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<bool>("LockoutEnabled")
+                        .HasColumnType("bit");
+
+                    b.Property<DateTimeOffset?>("LockoutEnd")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<string>("NormalizedEmail")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<string>("NormalizedUserName")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<string>("PasswordHash")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("PhoneNumber")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<bool>("PhoneNumberConfirmed")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("SecurityStamp")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<bool>("TwoFactorEnabled")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("UserName")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("NormalizedEmail")
+                        .HasDatabaseName("EmailIndex");
+
+                    b.HasIndex("NormalizedUserName")
+                        .IsUnique()
+                        .HasDatabaseName("UserNameIndex")
+                        .HasFilter("[NormalizedUserName] IS NOT NULL");
+
+                    b.ToTable("AspNetUsers", (string)null);
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRole<System.Guid>", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ConcurrencyStamp")
+                        .IsConcurrencyToken()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Name")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<string>("NormalizedName")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("NormalizedName")
+                        .IsUnique()
+                        .HasDatabaseName("RoleNameIndex")
+                        .HasFilter("[NormalizedName] IS NOT NULL");
+
+                    b.ToTable("AspNetRoles", (string)null);
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRoleClaim<System.Guid>", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("ClaimType")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("ClaimValue")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("RoleId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RoleId");
+
+                    b.ToTable("AspNetRoleClaims", (string)null);
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserClaim<System.Guid>", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("ClaimType")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("ClaimValue")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("AspNetUserClaims", (string)null);
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserLogin<System.Guid>", b =>
+                {
+                    b.Property<string>("LoginProvider")
+                        .HasColumnType("nvarchar(450)");
+
+                    b.Property<string>("ProviderKey")
+                        .HasColumnType("nvarchar(450)");
+
+                    b.Property<string>("ProviderDisplayName")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("LoginProvider", "ProviderKey");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("AspNetUserLogins", (string)null);
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserRole<System.Guid>", b =>
+                {
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("RoleId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("UserId", "RoleId");
+
+                    b.HasIndex("RoleId");
+
+                    b.ToTable("AspNetUserRoles", (string)null);
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserToken<System.Guid>", b =>
+                {
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("LoginProvider")
+                        .HasColumnType("nvarchar(450)");
+
+                    b.Property<string>("Name")
+                        .HasColumnType("nvarchar(450)");
+
+                    b.Property<string>("Value")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.HasKey("UserId", "LoginProvider", "Name");
+
+                    b.ToTable("AspNetUserTokens", (string)null);
                 });
 
             modelBuilder.Entity("FacebookPublisher.Domain.Entities.Campaign", b =>
@@ -374,6 +599,12 @@ namespace FacebookPublisher.Infrastructure.Persistence.Migrations
                     b.HasOne("FacebookPublisher.Domain.Entities.ContentPost", "ContentPost")
                         .WithMany("Campaigns")
                         .HasForeignKey("ContentPostId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("FacebookPublisher.Infrastructure.Identity.ApplicationUser", null)
+                        .WithMany()
+                        .HasForeignKey("OwnerId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
@@ -539,12 +770,36 @@ namespace FacebookPublisher.Infrastructure.Persistence.Migrations
                     b.Navigation("ContentPost");
                 });
 
+            modelBuilder.Entity("FacebookPublisher.Domain.Entities.ContentPost", b =>
+                {
+                    b.HasOne("FacebookPublisher.Infrastructure.Identity.ApplicationUser", null)
+                        .WithMany()
+                        .HasForeignKey("OwnerId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("FacebookPublisher.Domain.Entities.FacebookGroup", b =>
+                {
+                    b.HasOne("FacebookPublisher.Infrastructure.Identity.ApplicationUser", null)
+                        .WithMany()
+                        .HasForeignKey("OwnerId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("FacebookPublisher.Domain.Entities.PublisherSettings", b =>
                 {
+                    b.HasOne("FacebookPublisher.Infrastructure.Identity.ApplicationUser", null)
+                        .WithOne()
+                        .HasForeignKey("FacebookPublisher.Domain.Entities.PublisherSettings", "OwnerId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
                     b.OwnsOne("FacebookPublisher.Domain.Entities.BatchPacingConfig", "Pacing", b1 =>
                         {
-                            b1.Property<int>("PublisherSettingsId")
-                                .HasColumnType("int");
+                            b1.Property<Guid>("PublisherSettingsOwnerId")
+                                .HasColumnType("uniqueidentifier");
 
                             b1.Property<int>("ExtendedDelayAfterBatches")
                                 .ValueGeneratedOnAdd()
@@ -561,17 +816,17 @@ namespace FacebookPublisher.Infrastructure.Persistence.Migrations
                                 .HasColumnType("int")
                                 .HasDefaultValue(5);
 
-                            b1.HasKey("PublisherSettingsId");
+                            b1.HasKey("PublisherSettingsOwnerId");
 
                             b1.ToTable("PublisherSettings");
 
                             b1.WithOwner()
-                                .HasForeignKey("PublisherSettingsId");
+                                .HasForeignKey("PublisherSettingsOwnerId");
 
                             b1.OwnsOne("FacebookPublisher.Domain.Entities.DelayRange", "BatchDelay", b2 =>
                                 {
-                                    b2.Property<int>("BatchPacingConfigPublisherSettingsId")
-                                        .HasColumnType("int");
+                                    b2.Property<Guid>("BatchPacingConfigPublisherSettingsOwnerId")
+                                        .HasColumnType("uniqueidentifier");
 
                                     b2.Property<int>("Max")
                                         .ValueGeneratedOnAdd()
@@ -590,18 +845,18 @@ namespace FacebookPublisher.Infrastructure.Persistence.Migrations
                                         .HasColumnType("nvarchar(40)")
                                         .HasDefaultValue("Minutes");
 
-                                    b2.HasKey("BatchPacingConfigPublisherSettingsId");
+                                    b2.HasKey("BatchPacingConfigPublisherSettingsOwnerId");
 
                                     b2.ToTable("PublisherSettings");
 
                                     b2.WithOwner()
-                                        .HasForeignKey("BatchPacingConfigPublisherSettingsId");
+                                        .HasForeignKey("BatchPacingConfigPublisherSettingsOwnerId");
                                 });
 
                             b1.OwnsOne("FacebookPublisher.Domain.Entities.DelayRange", "ExtendedDelay", b2 =>
                                 {
-                                    b2.Property<int>("BatchPacingConfigPublisherSettingsId")
-                                        .HasColumnType("int");
+                                    b2.Property<Guid>("BatchPacingConfigPublisherSettingsOwnerId")
+                                        .HasColumnType("uniqueidentifier");
 
                                     b2.Property<int>("Max")
                                         .ValueGeneratedOnAdd()
@@ -620,18 +875,18 @@ namespace FacebookPublisher.Infrastructure.Persistence.Migrations
                                         .HasColumnType("nvarchar(40)")
                                         .HasDefaultValue("Hours");
 
-                                    b2.HasKey("BatchPacingConfigPublisherSettingsId");
+                                    b2.HasKey("BatchPacingConfigPublisherSettingsOwnerId");
 
                                     b2.ToTable("PublisherSettings");
 
                                     b2.WithOwner()
-                                        .HasForeignKey("BatchPacingConfigPublisherSettingsId");
+                                        .HasForeignKey("BatchPacingConfigPublisherSettingsOwnerId");
                                 });
 
                             b1.OwnsOne("FacebookPublisher.Domain.Entities.DelayRange", "PostDelay", b2 =>
                                 {
-                                    b2.Property<int>("BatchPacingConfigPublisherSettingsId")
-                                        .HasColumnType("int");
+                                    b2.Property<Guid>("BatchPacingConfigPublisherSettingsOwnerId")
+                                        .HasColumnType("uniqueidentifier");
 
                                     b2.Property<int>("Max")
                                         .ValueGeneratedOnAdd()
@@ -650,12 +905,12 @@ namespace FacebookPublisher.Infrastructure.Persistence.Migrations
                                         .HasColumnType("nvarchar(40)")
                                         .HasDefaultValue("Seconds");
 
-                                    b2.HasKey("BatchPacingConfigPublisherSettingsId");
+                                    b2.HasKey("BatchPacingConfigPublisherSettingsOwnerId");
 
                                     b2.ToTable("PublisherSettings");
 
                                     b2.WithOwner()
-                                        .HasForeignKey("BatchPacingConfigPublisherSettingsId");
+                                        .HasForeignKey("BatchPacingConfigPublisherSettingsOwnerId");
                                 });
 
                             b1.Navigation("BatchDelay")
@@ -669,6 +924,57 @@ namespace FacebookPublisher.Infrastructure.Persistence.Migrations
                         });
 
                     b.Navigation("Pacing")
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRoleClaim<System.Guid>", b =>
+                {
+                    b.HasOne("Microsoft.AspNetCore.Identity.IdentityRole<System.Guid>", null)
+                        .WithMany()
+                        .HasForeignKey("RoleId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserClaim<System.Guid>", b =>
+                {
+                    b.HasOne("FacebookPublisher.Infrastructure.Identity.ApplicationUser", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserLogin<System.Guid>", b =>
+                {
+                    b.HasOne("FacebookPublisher.Infrastructure.Identity.ApplicationUser", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserRole<System.Guid>", b =>
+                {
+                    b.HasOne("Microsoft.AspNetCore.Identity.IdentityRole<System.Guid>", null)
+                        .WithMany()
+                        .HasForeignKey("RoleId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("FacebookPublisher.Infrastructure.Identity.ApplicationUser", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserToken<System.Guid>", b =>
+                {
+                    b.HasOne("FacebookPublisher.Infrastructure.Identity.ApplicationUser", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
 

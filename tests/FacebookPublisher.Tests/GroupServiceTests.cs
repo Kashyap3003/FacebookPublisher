@@ -12,7 +12,12 @@ public class GroupServiceTests
     private readonly CampaignRunnerTests.FakeAutomation _automation = new();
     private readonly CampaignExecutionTracker _tracker = new();
 
-    private GroupService CreateService() => new(_db, _automation, _tracker, NullLogger<GroupService>.Instance);
+    private GroupService CreateService() => new(
+        _db,
+        new FakeAutomationFactory().Use(CampaignRunnerTests.TestDbFactory.DefaultOwner, _automation),
+        new FakeCurrentUser(CampaignRunnerTests.TestDbFactory.DefaultOwner),
+        _tracker,
+        NullLogger<GroupService>.Instance);
 
     [Fact]
     public async Task Bulk_add_resolves_share_links_to_group_addresses_and_names()
@@ -82,7 +87,7 @@ public class GroupServiceTests
     [Fact]
     public async Task Share_links_are_not_resolved_while_a_campaign_is_running()
     {
-        _tracker.Begin(Guid.NewGuid(), CancellationToken.None);
+        _tracker.Begin(Guid.NewGuid(), CampaignRunnerTests.TestDbFactory.DefaultOwner, CancellationToken.None);
 
         var ex = await Assert.ThrowsAsync<AppValidationException>(() =>
             CreateService().AddAsync(new SaveGroupRequest(null, "https://www.facebook.com/share/g/1GtRXQEUEy/", null)));

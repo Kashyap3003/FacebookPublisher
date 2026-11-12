@@ -1,0 +1,261 @@
+@page "/admin/users"
+@attribute [Authorize(Roles = FacebookPublisher.Application.Abstractions.AppRoles.Admin)]
+@using FacebookPublisher.Application.Abstractions
+@inherits AppComponentBase
+@inject IUserAdministration UserAdmin
+@inject IJSRuntime JS
+
+<PageTitle>User Management · Group Publisher</PageTitle>
+
+<div class="page-header">
+    <div>
+        <h1>User Management</h1>
+        <p>Create Group Publisher accounts and control who can sign in. Each user has their own groups, content, campaigns,
+            settings and Facebook connection — administrators cannot see other users' data here.</p>
+    </div>
+</div>
+
+<AlertBox Errors="Errors" Success="@Success" />
+
+<div class="row g-3">
+    <div class="col-xl-4">
+        <div class="card-panel">
+            <h2><i class="bi bi-person-plus"></i> Create user</h2>
+            <EditForm Model="_new" OnValidSubmit="CreateAsync" FormName="create-user">
+                <DataAnnotationsValidator />
+                <div class="mb-2">
+                    <label class="form-label" for="new-email">Email (used to sign in)</label>
+                    <InputText id="new-email" class="form-control" @bind-Value="_new.Email" autocomplete="off" />
+                    <ValidationMessage For="() => _new.Email" />
+                </div>
+                <div class="mb-2">
+                    <label class="form-label" for="new-name">Display name <span class="text-muted">(optional)</span></label>
+                    <InputText id="new-name" class="form-control" @bind-Value="_new.DisplayName" />
+                </div>
+                <div class="mb-2">
+                    <label class="form-label" for="new-password">Initial password</label>
+                    <InputText id="new-password" type="password" class="form-control" @bind-Value="_new.Password" autocomplete="new-password" />
+                    <ValidationMessage For="() => _new.Password" />
+                    <div class="form-text">At least 10 characters with upper- and lower-case letters and a digit. Share it with the user securely.</div>
+                </div>
+                <div class="form-check form-switch mb-3">
+                    <InputCheckbox id="new-admin" class="form-check-input" @bind-Value="_new.IsAdmin" />
+                    <label class="form-check-label" for="new-admin">Administrator (can manage users)</label>
+                </div>
+                <button type="submit" class="btn btn-primary" disabled="@Busy"><i class="bi bi-person-plus"></i> Create user</button>
+            </EditForm>
+        </div>
+    </div>
+
+    <div class="col-xl-8">
+        <div class="card-panel">
+            <h2><i class="bi bi-people"></i> Users (@_users.Count)</h2>
+            @if (_users.Count == 0)
+            {
+                <div class="empty-state"><i class="bi bi-people"></i>No users yet.</div>
+            }
+            else
+            {
+                <div class="table-wrap">
+                    <table class="table table-app table-hover">
+                        <thead>
+                            <tr><th>User</th><th>Role</th><th>Status</th><th>Last sign-in</th><th class="text-end">Actions</th></tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var u in _users)
+                            {
+                                <tr class="@(u.IsDisabled ? "opacity-50" : "")">
+                                    <td>
+                                        <div class="fw-semibold">@(u.DisplayName ?? u.Email)</div>
+                                        <div class="text-muted small">@u.Email</div>
+                                    </td>
+                                    <td>@(u.IsAdmin ? "Administrator" : "User")</td>
+                                    <td>
+                                        @if (u.IsDisabled)
+                                        {
+                                            <span class="status-badge s-danger">Disabled</span>
+                                        }
+                                        else if (u.IsLockedOut)
+                                        {
+                                            <span class="status-badge s-warning" title="Too many failed sign-in attempts">Locked out</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="status-badge s-success">Active</span>
+                                        }
+                                        @if (u.Id == _myId)
+                                        {
+                                            <span class="text-muted small ms-1">(you)</span>
+                                        }
+                                    </td>
+                                    <td class="small text-nowrap" title="@Fmt.Time(u.LastLoginAtUtc)">@Fmt.Relative(u.LastLoginAtUtc)</td>
+                                    <td class="text-end text-nowrap">
+                                        <button class="btn btn-sm btn-outline-secondary btn-icon" title="Edit" disabled="@Busy" @onclick="() => StartEdit(u)"><i class="bi bi-pencil"></i></button>
+                                        <button class="btn btn-sm btn-outline-secondary btn-icon" title="Reset password" disabled="@Busy" @onclick="() => StartReset(u)"><i class="bi bi-key"></i></button>
+                                        @if (u.IsDisabled)
+                                        {
+                                            <button class="btn btn-sm btn-outline-success" disabled="@Busy" @onclick="() => SetDisabledAsync(u, false)">Enable</button>
+                                        }
+                                        else
+                                        {
+                                            <button class="btn btn-sm btn-outline-danger" disabled="@(Busy || u.Id == _myId)" @onclick="() => SetDisabledAsync(u, true)">Disable</button>
+                                        }
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </div>
+    </div>
+</div>
+
+@if (_edit is not null)
+{
+    <div class="modal-backdrop-app" @onclick="() => _edit = null">
+        <div class="modal-panel" @onclick:stopPropagation="true">
+            <h5 class="mb-3">Edit @_edit.Email</h5>
+            <div class="mb-2">
+                <label class="form-label" for="edit-name">Display name</label>
+                <input id="edit-name" class="form-control" @bind="_editName" />
+            </div>
+            <div class="form-check form-switch mb-3">
+                <input id="edit-admin" class="form-check-input" type="checkbox" @bind="_editAdmin" disabled="@(_edit.Id == _myId)" />
+                <label class="form-check-label" for="edit-admin">Administrator</label>
+            </div>
+            <div class="d-flex gap-2 justify-content-end">
+                <button class="btn btn-light" @onclick="() => _edit = null">Cancel</button>
+                <button class="btn btn-primary" disabled="@Busy" @onclick="SaveEditAsync">Save</button>
+            </div>
+        </div>
+    </div>
+}
+
+@if (_reset is not null)
+{
+    <div class="modal-backdrop-app" @onclick="() => _reset = null">
+        <div class="modal-panel" @onclick:stopPropagation="true">
+            <h5 class="mb-3">Reset password for @_reset.Email</h5>
+            <div class="mb-2">
+                <label class="form-label" for="reset-password">New password</label>
+                <input id="reset-password" type="password" class="form-control" autocomplete="new-password" @bind="_resetPassword" />
+                <div class="form-text">The user is signed out everywhere within a minute and must use the new password.</div>
+            </div>
+            <div class="d-flex gap-2 justify-content-end">
+                <button class="btn btn-light" @onclick="() => _reset = null">Cancel</button>
+                <button class="btn btn-primary" disabled="@(Busy || string.IsNullOrEmpty(_resetPassword))" @onclick="ResetPasswordAsync">Set password</button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private List<UserDto> _users = [];
+    private NewUserForm _new = new();
+    private Guid? _myId;
+    private UserDto? _edit;
+    private string? _editName;
+    private bool _editAdmin;
+    private UserDto? _reset;
+    private string _resetPassword = string.Empty;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _myId = await GetCurrentUserIdAsync();
+        await RunAsync(LoadAsync);
+    }
+
+    private async Task LoadAsync() => _users = (await UserAdmin.ListAsync()).ToList();
+
+    private async Task CreateAsync()
+    {
+        var email = _new.Email;
+        if (await RunAsync(async () =>
+            {
+                await UserAdmin.CreateAsync(new CreateUserRequest(_new.Email, _new.DisplayName, _new.Password, _new.IsAdmin));
+                await LoadAsync();
+            }, $"Account {email} created."))
+        {
+            _new = new NewUserForm();
+        }
+    }
+
+    private void StartEdit(UserDto user)
+    {
+        ClearMessages();
+        _edit = user;
+        _editName = user.DisplayName;
+        _editAdmin = user.IsAdmin;
+    }
+
+    private async Task SaveEditAsync()
+    {
+        if (_edit is null)
+        {
+            return;
+        }
+        var user = _edit;
+        if (await RunAsync(async () =>
+            {
+                await UserAdmin.UpdateAsync(user.Id, _editName, _editAdmin);
+                await LoadAsync();
+            }, "User updated."))
+        {
+            _edit = null;
+        }
+    }
+
+    private void StartReset(UserDto user)
+    {
+        ClearMessages();
+        _reset = user;
+        _resetPassword = string.Empty;
+    }
+
+    private async Task ResetPasswordAsync()
+    {
+        if (_reset is null)
+        {
+            return;
+        }
+        var user = _reset;
+        if (await RunAsync(async () =>
+            {
+                await UserAdmin.ResetPasswordAsync(user.Id, _resetPassword);
+                await LoadAsync();
+            }, $"Password for {user.Email} changed."))
+        {
+            _reset = null;
+            _resetPassword = string.Empty;
+        }
+    }
+
+    private async Task SetDisabledAsync(UserDto user, bool disabled)
+    {
+        if (disabled && !await JS.InvokeAsync<bool>("confirm",
+                $"Disable {user.Email}? They are signed out within a minute and their running campaigns are stopped. Their data is kept."))
+        {
+            return;
+        }
+        await RunAsync(async () =>
+        {
+            await UserAdmin.SetDisabledAsync(user.Id, disabled);
+            await LoadAsync();
+        }, disabled ? $"{user.Email} disabled." : $"{user.Email} enabled.");
+    }
+
+    private sealed class NewUserForm
+    {
+        [System.ComponentModel.DataAnnotations.Required(ErrorMessage = "Enter the email address.")]
+        [System.ComponentModel.DataAnnotations.EmailAddress(ErrorMessage = "Enter a valid email address.")]
+        public string Email { get; set; } = string.Empty;
+
+        public string? DisplayName { get; set; }
+
+        [System.ComponentModel.DataAnnotations.Required(ErrorMessage = "Enter an initial password.")]
+        public string Password { get; set; } = string.Empty;
+
+        public bool IsAdmin { get; set; }
+    }
+}

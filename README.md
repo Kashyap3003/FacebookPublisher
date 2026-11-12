@@ -185,6 +185,31 @@ All batch and delay information comes from the database, so the monitor is corre
 UI updates are pushed over the Blazor Server SignalR circuit), and (b) the SignalR hub at `/hubs/campaigns`
 (`CampaignChanged`, `TargetChanged`, `Message` events) for any external client.
 
+## Users, sign-in and Facebook sessions
+
+Group Publisher is multi-user: everyone signs in with their own account and sees only their own groups, content,
+campaigns, reports and uploads, and posts through their own Facebook session.
+
+**First administrator.** No accounts are built in. Before the first start, set environment variables (or user-secrets):
+
+```powershell
+$env:InitialAdmin__Email = "you@company.com"
+$env:InitialAdmin__Password = "a-strong-password"   # at least 10 characters
+```
+
+On startup the app creates that administrator (on an upgraded install it also takes ownership of all existing data).
+Afterwards the variables can be removed. There is no public registration: administrators create, enable, disable,
+promote and reset users under **User Management**. Five wrong passwords lock an account for 15 minutes; disabling a
+user signs them out within a minute and stops their running campaign.
+
+**Facebook login.** Each user opens **Settings → Open Facebook login**, signs in to Facebook in the Chrome window that
+appears (Group Publisher never asks for or stores the Facebook password), then clicks **Verify**. The session lives in a
+private Chrome profile at `App_Data/BrowserProfiles/{UserId}`; **Disconnect** deletes it. Profiles are never shared or
+served over HTTP. Uploads are stored per user under `uploads/{UserId}`.
+
+**Concurrency.** Different users' campaigns run at the same time (up to `Campaigns:MaxConcurrentCampaigns`, default 10).
+Each user runs one campaign at a time; their further campaigns queue.
+
 ## Prerequisites
 
 - .NET 10 SDK
