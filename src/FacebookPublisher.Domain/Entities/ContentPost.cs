@@ -3,8 +3,11 @@ using FacebookPublisher.Domain.Enums;
 
 namespace FacebookPublisher.Domain.Entities;
 
-public class ContentPost : BaseEntity
+public class ContentPost : BaseEntity, IOwnedEntity
 {
+    /// <summary>Application user who created this content. Attachments inherit ownership from it.</summary>
+    public Guid OwnerId { get; set; }
+
     public string Title { get; set; } = string.Empty;
 
     public string? Text { get; set; }

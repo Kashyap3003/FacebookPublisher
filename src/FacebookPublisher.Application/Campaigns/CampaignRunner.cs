@@ -18,8 +18,9 @@ namespace FacebookPublisher.Application.Campaigns;
 /// </para>
 /// </summary>
 public sealed class CampaignRunner(
-    IApplicationDbContextFactory dbFactory,
-    IFacebookAutomation automation,
+    ISystemDbContextFactory dbFactory,
+    IFacebookAutomationFactory automationFactory,
+    IUserAccounts userAccounts,
     IFileStorage storage,
     ICampaignApprovalGate approvalGate,
     ICampaignProgressNotifier notifier,
@@ -31,9 +32,30 @@ public sealed class CampaignRunner(
     /// <summary>Long waits are split into chunks so the heartbeat (execution lease) stays fresh.</summary>
     public static readonly TimeSpan HeartbeatInterval = TimeSpan.FromMinutes(1);
 
+    /// <summary>The campaign owner's browser automation (set once the owner is known).</summary>
+    private IFacebookAutomation automation = null!;
+
+    /// <summary>Looks up which application user owns a campaign (from persisted data). Null if it does not exist.</summary>
+    public async Task<Guid?> GetOwnerIdAsync(Guid campaignId, CancellationToken cancellationToken = default)
+    {
+        await using var system = await dbFactory.CreateUnscopedAsync(cancellationToken);
+        return await system.Campaigns.AsNoTracking()
+            .Where(c => c.Id == campaignId)
+            .Select(c => (Guid?)c.OwnerId)
+            .FirstOrDefaultAsync(cancellationToken);
+    }
+
     public async Task RunAsync(Guid campaignId, CancellationToken cancellationToken, CancellationToken hostStoppingToken)
     {
-        await using var db = await dbFactory.CreateAsync(CancellationToken.None);
+        // The owner comes from the campaign record, never from whoever is using the UI. Everything below runs in a
+        // context restricted to that owner, with that owner's browser profile.
+        if (await GetOwnerIdAsync(campaignId, CancellationToken.None) is not { } ownerId)
+        {
+            logger.LogWarning("Campaign {CampaignId} does not exist; skipping", campaignId);
+            return;
+        }
+        await using var db = await dbFactory.CreateForOwnerAsync(ownerId, CancellationToken.None);
+        automation = automationFactory.ForUser(ownerId);
 
         var campaign = await db.Campaigns
             .Include(c => c.ContentPost!).ThenInclude(p => p.Attachments)
@@ -50,6 +72,22 @@ public sealed class CampaignRunner(
             logger.LogWarning("Campaign {CampaignId} is leased by another application instance; skipping", campaignId);
             return;
         }
+        if (!await userAccounts.IsActiveAsync(ownerId, CancellationToken.None))
+        {
+            logger.LogWarning("Campaign {CampaignId} belongs to disabled user {OwnerId}; not executed", campaignId, ownerId);
+            campaign.Finish(CampaignStatus.Halted, "The account that owns this campaign is disabled.");
+            campaign.ReconcileProgress();
+            try
+            {
+                await db.SaveChangesAsync(CancellationToken.None);
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                return;
+            }
+            await NotifyCampaignAsync(campaign);
+            return;
+        }
 
         // Claim the execution lease. The row version makes this atomic: a concurrent claim or Stop makes it fail.
         campaign.MarkRunning(tracker.InstanceId);
@@ -64,7 +102,7 @@ public sealed class CampaignRunner(
             return;
         }
 
-        using var _ = logger.BeginScope(new Dictionary<string, object> { ["CampaignId"] = campaignId });
+        using var _ = logger.BeginScope(new Dictionary<string, object> { ["CampaignId"] = campaignId, ["OwnerId"] = ownerId });
         var pacing = campaign.Pacing;
         var remainingAtStart = campaign.Targets.Count(t => t.IsProcessable);
         logger.LogInformation("Campaign '{Name}' started with {Remaining} of {Total} group(s) remaining", campaign.Name, remainingAtStart, campaign.Targets.Count);
@@ -78,7 +116,7 @@ public sealed class CampaignRunner(
             + DurationText.Summary(pacing) + ". "
             + (campaign.RequireApproval ? "Each post is reviewed before publishing." : "Fully automatic posting."));
 
-        var settings = await db.Settings.AsNoTracking().FirstOrDefaultAsync(s => s.Id == PublisherSettings.SingletonId, CancellationToken.None)
+        var settings = await db.Settings.AsNoTracking().FirstOrDefaultAsync(CancellationToken.None)
             ?? new PublisherSettings();
 
         try
@@ -440,11 +478,11 @@ public sealed class CampaignRunner(
         var files = new List<PublishFile>();
         foreach (var attachment in content.Attachments.OrderBy(a => a.SortOrder))
         {
-            if (!storage.Exists(attachment.StoredFileName))
+            if (!storage.Exists(content.OwnerId, attachment.StoredFileName))
             {
                 throw new InvalidOperationException($"Attachment '{attachment.OriginalFileName}' is missing from storage.");
             }
-            files.Add(new PublishFile(storage.GetFullPath(attachment.StoredFileName), attachment.OriginalFileName, attachment.Type));
+            files.Add(new PublishFile(storage.GetFullPath(content.OwnerId, attachment.StoredFileName), attachment.OriginalFileName, attachment.Type));
         }
         return new PublishRequest(content.Text, files, TimeSpan.FromSeconds(settings.UploadTimeoutSeconds));
     }
@@ -456,6 +494,7 @@ public sealed class CampaignRunner(
         campaign.LastExecutionAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(CancellationToken.None);
         await notifier.TargetChangedAsync(
+            campaign.OwnerId,
             campaign.Id,
             TargetProgressDto.From(target),
             CampaignCountsDto.From(campaign.Targets.Select(t => t.Status)),
@@ -470,7 +509,7 @@ public sealed class CampaignRunner(
     }
 
     private Task EmitAsync(Campaign campaign, CampaignMessageLevel level, string text, CampaignTarget? target = null, DateTime? until = null) =>
-        notifier.MessageAsync(campaign.Id, new CampaignMessage(level, text, target?.Id, until, target?.GroupName), CancellationToken.None);
+        notifier.MessageAsync(campaign.OwnerId, campaign.Id, new CampaignMessage(level, text, target?.Id, until, target?.GroupName), CancellationToken.None);
 
     private Task NotifyCampaignAsync(Campaign campaign) =>
         notifier.CampaignChangedAsync(CampaignProgressDto.From(campaign), CancellationToken.None);

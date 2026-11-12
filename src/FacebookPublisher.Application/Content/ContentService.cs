@@ -104,7 +104,9 @@ public sealed class ContentService(
             throw new AppValidationException("The content is not valid.", errors);
         }
 
-        var content = new ContentPost { Title = title, Text = text };
+        await using var db = await dbFactory.CreateAsync(ct);
+        var ownerId = db.RequireOwnerId();
+        var content = new ContentPost { OwnerId = ownerId, Title = title, Text = text };
         var savedFiles = new List<string>();
         try
         {
@@ -113,7 +115,7 @@ public sealed class ContentService(
             {
                 FileValidator.TryClassify(file.FileName, _options, out var classification, out _);
                 await using var stream = file.OpenReadStream();
-                var stored = await storage.SaveAsync(stream, file.FileName, classification!.MaxBytes, ct);
+                var stored = await storage.SaveAsync(ownerId, stream, file.FileName, classification!.MaxBytes, ct);
                 savedFiles.Add(stored.StoredFileName);
 
                 content.Attachments.Add(new ContentAttachment
@@ -130,7 +132,6 @@ public sealed class ContentService(
 
             content.ContentHash = ComputeContentHash(text, content.Attachments.Select(a => a.Sha256));
 
-            await using var db = await dbFactory.CreateAsync(ct);
             db.Contents.Add(content);
             await db.SaveChangesAsync(ct);
 
@@ -142,7 +143,7 @@ public sealed class ContentService(
         {
             foreach (var stored in savedFiles)
             {
-                storage.Delete(stored);
+                storage.Delete(ownerId, stored);
             }
             throw;
         }
@@ -167,7 +168,7 @@ public sealed class ContentService(
 
         foreach (var file in files)
         {
-            storage.Delete(file);
+            storage.Delete(content.OwnerId, file);
         }
         logger.LogInformation("Deleted content {ContentId}", id);
     }
@@ -175,12 +176,16 @@ public sealed class ContentService(
     public async Task<AttachmentFile?> GetAttachmentFileAsync(Guid attachmentId, CancellationToken ct = default)
     {
         await using var db = await dbFactory.CreateAsync(ct);
-        var attachment = await db.Attachments.AsNoTracking().FirstOrDefaultAsync(a => a.Id == attachmentId, ct);
-        if (attachment is null || !storage.Exists(attachment.StoredFileName))
+        // The owner-scoped query returns nothing for another user's attachment, so the endpoint answers 404.
+        var attachment = await db.Attachments.AsNoTracking()
+            .Where(a => a.Id == attachmentId)
+            .Select(a => new { a.StoredFileName, a.MimeType, a.OriginalFileName, OwnerId = a.ContentPost!.OwnerId })
+            .FirstOrDefaultAsync(ct);
+        if (attachment is null || !storage.Exists(attachment.OwnerId, attachment.StoredFileName))
         {
             return null;
         }
-        return new AttachmentFile(storage.GetFullPath(attachment.StoredFileName), attachment.MimeType, attachment.OriginalFileName);
+        return new AttachmentFile(storage.GetFullPath(attachment.OwnerId, attachment.StoredFileName), attachment.MimeType, attachment.OriginalFileName);
     }
 
     internal static ContentDetailDto ToDetail(ContentPost content) => new(

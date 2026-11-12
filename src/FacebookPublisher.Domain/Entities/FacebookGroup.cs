@@ -3,8 +3,11 @@ using FacebookPublisher.Domain.Enums;
 
 namespace FacebookPublisher.Domain.Entities;
 
-public class FacebookGroup : BaseEntity
+public class FacebookGroup : BaseEntity, IOwnedEntity
 {
+    /// <summary>Application user who saved this group. Each user has their own list.</summary>
+    public Guid OwnerId { get; set; }
+
     public string Name { get; set; } = string.Empty;
 
     /// <summary>Canonical URL in the form https://www.facebook.com/groups/{identifier}.</summary>

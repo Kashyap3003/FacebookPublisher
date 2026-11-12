@@ -8,7 +8,7 @@ using Microsoft.Extensions.Logging;
 
 namespace FacebookPublisher.Application.Settings;
 
-/// <summary>Editable settings form model.</summary>
+/// <summary>Editable settings form model (always the signed-in user's own settings).</summary>
 public sealed class SettingsModel
 {
     /// <summary>Default batch processing and delay settings for new campaigns.</summary>
@@ -24,9 +24,6 @@ public sealed class SettingsModel
 
     [Range(0, 720, ErrorMessage = "Duplicate window must be between 0 and 720 hours.")]
     public int DuplicateWindowHours { get; set; }
-
-    [Required(ErrorMessage = "Browser profile folder is required.")]
-    public string BrowserProfilePath { get; set; } = string.Empty;
 
     public string BrowserChannel { get; set; } = string.Empty;
 
@@ -55,7 +52,7 @@ public sealed class SettingsService(IApplicationDbContextFactory dbFactory, ILog
     public async Task<PublisherSettings> GetEntityAsync(CancellationToken ct = default)
     {
         await using var db = await dbFactory.CreateAsync(ct);
-        return await db.Settings.AsNoTracking().FirstOrDefaultAsync(s => s.Id == PublisherSettings.SingletonId, ct)
+        return await db.Settings.AsNoTracking().FirstOrDefaultAsync(ct)
             ?? CreateDefaults();
     }
 
@@ -69,7 +66,6 @@ public sealed class SettingsService(IApplicationDbContextFactory dbFactory, ILog
             ApprovalTimeoutMinutes = s.ApprovalTimeoutMinutes,
             MaxGroupsPerCampaign = s.MaxGroupsPerCampaign,
             DuplicateWindowHours = s.DuplicateWindowHours,
-            BrowserProfilePath = s.BrowserProfilePath,
             BrowserChannel = s.BrowserChannel,
             Headless = s.Headless,
             NavigationTimeoutSeconds = s.NavigationTimeoutSeconds,
@@ -95,10 +91,11 @@ public sealed class SettingsService(IApplicationDbContextFactory dbFactory, ILog
         }
 
         await using var db = await dbFactory.CreateAsync(ct);
-        var s = await db.Settings.FirstOrDefaultAsync(x => x.Id == PublisherSettings.SingletonId, ct);
+        var s = await db.Settings.FirstOrDefaultAsync(ct);
         if (s is null)
         {
             s = CreateDefaults();
+            s.OwnerId = db.RequireOwnerId();
             db.Settings.Add(s);
         }
 
@@ -107,7 +104,6 @@ public sealed class SettingsService(IApplicationDbContextFactory dbFactory, ILog
         s.ApprovalTimeoutMinutes = model.ApprovalTimeoutMinutes;
         s.MaxGroupsPerCampaign = model.MaxGroupsPerCampaign;
         s.DuplicateWindowHours = model.DuplicateWindowHours;
-        s.BrowserProfilePath = model.BrowserProfilePath.Trim();
         s.BrowserChannel = model.BrowserChannel ?? string.Empty;
         s.Headless = model.Headless;
         s.NavigationTimeoutSeconds = model.NavigationTimeoutSeconds;
@@ -134,25 +130,25 @@ public sealed class SettingsService(IApplicationDbContextFactory dbFactory, ILog
         to.ExtendedDelay.Unit = from.ExtendedDelay.Unit;
     }
 
-    public async Task RecordSessionCheckAsync(bool isLoggedIn, DateTime checkedAtUtc, CancellationToken ct = default)
+    /// <summary>Records the last Facebook session check for the signed-in user; null clears it (after a disconnect).</summary>
+    public async Task RecordSessionCheckAsync(bool? isLoggedIn, DateTime? checkedAtUtc, CancellationToken ct = default)
     {
         await using var db = await dbFactory.CreateAsync(ct);
-        var s = await db.Settings.FirstOrDefaultAsync(x => x.Id == PublisherSettings.SingletonId, ct);
+        var s = await db.Settings.FirstOrDefaultAsync(ct);
         if (s is null)
         {
-            return;
+            s = CreateDefaults();
+            s.OwnerId = db.RequireOwnerId();
+            db.Settings.Add(s);
         }
         s.SessionLastVerifiedAtUtc = checkedAtUtc;
         s.SessionLastVerifiedResult = isLoggedIn;
         await db.SaveChangesAsync(ct);
     }
 
+    /// <summary>Defaults for a user who has not saved settings yet. The owner is stamped by the owner-scoped context on save.</summary>
     public static PublisherSettings CreateDefaults() => new()
     {
-        BrowserProfilePath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "FacebookPublisher",
-            "BrowserProfile"),
         BrowserChannel = "chrome",
         RequireApprovalByDefault = false
     };

@@ -24,7 +24,8 @@ public sealed record BulkAddResult(int Added, IReadOnlyList<string> Duplicates, 
 
 public sealed class GroupService(
     IApplicationDbContextFactory dbFactory,
-    IFacebookAutomation automation,
+    IFacebookAutomationFactory automationFactory,
+    ICurrentUser currentUser,
     ICampaignExecutionTracker tracker,
     ILogger<GroupService> logger)
 {
@@ -203,18 +204,24 @@ public sealed class GroupService(
     /// <summary>Opens the group in the automated browser and records whether the account can access it. Never joins.</summary>
     public async Task<MembershipCheckResult> VerifyAccessAsync(Guid id, CancellationToken ct = default)
     {
-        if (tracker.ActiveCampaignId is not null)
-        {
-            throw new AppValidationException("A campaign is running. Access checks are disabled until it finishes.");
-        }
-
         await using var db = await dbFactory.CreateAsync(ct);
         var group = await db.Groups.FirstOrDefaultAsync(g => g.Id == id, ct) ?? throw new NotFoundException("Group", id);
+        var automation = BrowserFor(db.RequireOwnerId(), "Access checks");
 
         var result = await automation.CheckMembershipAsync(group.Url, progress: null, ct);
         group.RecordMembership(result.Status, result.GroupName);
         await db.SaveChangesAsync(ct);
         return result;
+    }
+
+    /// <summary>The signed-in user's own browser; refused while one of their campaigns is using it.</summary>
+    private IFacebookAutomation BrowserFor(Guid ownerId, string feature)
+    {
+        if (tracker.IsOwnerBusy(ownerId))
+        {
+            throw new AppValidationException($"{feature} use your Facebook browser, which is busy with one of your running campaigns. Try again after it finishes.");
+        }
+        return automationFactory.ForUser(ownerId);
     }
 
     /// <summary>Returns the canonical group URL, opening share links in the logged-in browser to find it.</summary>
@@ -228,11 +235,7 @@ public sealed class GroupService(
         {
             throw new AppValidationException(error!);
         }
-        if (tracker.ActiveCampaignId is not null)
-        {
-            throw new AppValidationException("Share links are opened in the automation browser, which is busy with a running campaign. Add them after it finishes.");
-        }
-
+        var automation = BrowserFor(await currentUser.GetUserIdAsync(ct), "Share links");
         var resolved = await automation.ResolveLinkAsync(shareUrl, ct);
         if (resolved is null)
         {

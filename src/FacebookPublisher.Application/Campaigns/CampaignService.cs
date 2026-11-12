@@ -34,7 +34,7 @@ public sealed class CampaignService(
     {
         await ReconcileOrphanedCampaignsAsync(ct);
         await using var db = await dbFactory.CreateAsync(ct);
-        var settings = await db.Settings.AsNoTracking().FirstOrDefaultAsync(s => s.Id == PublisherSettings.SingletonId, ct)
+        var settings = await db.Settings.AsNoTracking().FirstOrDefaultAsync(ct)
             ?? new PublisherSettings();
 
         var groupIds = request.GroupIds.Distinct().ToList();
@@ -186,6 +186,15 @@ public sealed class CampaignService(
     /// <summary>Stops a queued or running campaign. Remaining groups stay Pending so it can be resumed later.</summary>
     public async Task StopAsync(Guid campaignId, CancellationToken ct = default)
     {
+        // Ownership first: the campaign must be visible in the signed-in user's scope before anything is cancelled.
+        await using (var check = await dbFactory.CreateAsync(ct))
+        {
+            if (!await check.Campaigns.AnyAsync(c => c.Id == campaignId, ct))
+            {
+                throw new NotFoundException("Campaign", campaignId);
+            }
+        }
+
         if (tracker.RequestCancel(campaignId))
         {
             logger.LogInformation("Stop requested for running campaign {CampaignId}", campaignId);
@@ -334,14 +343,26 @@ public sealed class CampaignService(
         return orphans.Count;
     }
 
-    public bool SubmitApproval(Guid targetId, bool approve)
+    /// <summary>Approves or rejects a prepared post. Only the owner of the campaign can decide.</summary>
+    public async Task<bool> SubmitApprovalAsync(Guid targetId, bool approve, CancellationToken ct = default)
     {
+        await using var db = await dbFactory.CreateAsync(ct);
+        if (!await db.CampaignTargets.AnyAsync(t => t.Id == targetId, ct))
+        {
+            throw new NotFoundException("Group", targetId);
+        }
+
         var resolved = approvalGate.Resolve(targetId, approve);
         logger.LogInformation("Approval for target {TargetId}: {Decision} (resolved: {Resolved})", targetId, approve ? "approved" : "rejected", resolved);
         return resolved;
     }
 
-    public bool IsAwaitingApproval(Guid targetId) => approvalGate.IsAwaiting(targetId);
+    /// <summary>True while one of the signed-in user's campaigns is executing (their browser profile is in use).</summary>
+    public async Task<bool> HasRunningCampaignAsync(CancellationToken ct = default)
+    {
+        await using var db = await dbFactory.CreateAsync(ct);
+        return tracker.IsOwnerBusy(db.RequireOwnerId());
+    }
 
     public async Task<CampaignProgressDto?> GetProgressAsync(Guid campaignId, CancellationToken ct = default)
     {

@@ -2,14 +2,15 @@
 @inherits AppComponentBase
 @inject SettingsService SettingsService
 @inject BrowserSessionService Session
-@inject FacebookPublisher.Application.Abstractions.ICampaignExecutionTracker Tracker
+@inject CampaignService CampaignService
+@inject IJSRuntime JS
 
 <PageTitle>Settings · Group Publisher</PageTitle>
 
 <div class="page-header">
     <div>
         <h1>Settings</h1>
-        <p>Facebook session, publishing pace and browser configuration.</p>
+        <p>Your Facebook connection, publishing pace and browser configuration. These settings are yours only.</p>
     </div>
 </div>
 
@@ -22,28 +23,36 @@
 else
 {
     <div class="card-panel">
-        <h2><i class="bi bi-person-badge"></i> Facebook session</h2>
+        <h2><i class="bi bi-facebook"></i> Facebook connection</h2>
         <div class="row g-3 align-items-center">
             <div class="col-lg-7">
                 <p class="mb-2">
-                    This application never asks for or stores your Facebook password. It uses a dedicated browser profile:
-                    open the login window, sign in to Facebook yourself (including any 2-factor step), and the session is reused for publishing.
+                    Your Facebook account is separate from your Group Publisher account. Group Publisher keeps a private browser
+                    profile just for you: open the login window, sign in to Facebook yourself (including any 2-factor step),
+                    then verify. Your password is never asked for or stored, and no other user can use your session.
                 </p>
-                <div class="d-flex align-items-center gap-2">
-                    <span class="text-muted">Last verification:</span>
+                <div class="d-flex flex-wrap align-items-center gap-2">
+                    <span class="text-muted">Status:</span>
                     @if (_model.SessionLastVerifiedResult is null)
                     {
-                        <span class="status-badge s-neutral">Not verified</span>
+                        <span class="status-badge s-neutral"><i class="bi bi-plug"></i> Not connected / not verified</span>
                     }
                     else if (_model.SessionLastVerifiedResult == true)
                     {
-                        <span class="status-badge s-success"><i class="bi bi-check-circle"></i> Logged in</span>
+                        <span class="status-badge s-success"><i class="bi bi-check-circle"></i> Connected</span>
                     }
                     else
                     {
                         <span class="status-badge s-danger"><i class="bi bi-x-circle"></i> Not logged in</span>
                     }
-                    <span class="text-muted small">@Fmt.Relative(_model.SessionLastVerifiedAtUtc)</span>
+                    @if (_model.SessionLastVerifiedAtUtc is not null)
+                    {
+                        <span class="text-muted small">verified @Fmt.Relative(_model.SessionLastVerifiedAtUtc)</span>
+                    }
+                    @if (_browserOpen)
+                    {
+                        <span class="status-badge s-info"><i class="bi bi-window"></i> Browser open</span>
+                    }
                 </div>
                 @if (_sessionMessage is not null)
                 {
@@ -51,23 +60,24 @@ else
                 }
             </div>
             <div class="col-lg-5 d-flex flex-wrap gap-2 justify-content-lg-end">
-                <button class="btn btn-primary" disabled="@(Busy || CampaignActive)" @onclick="OpenLoginAsync"><i class="bi bi-box-arrow-in-right"></i> Open login window</button>
-                <button class="btn btn-outline-primary" disabled="@(Busy || CampaignActive)" @onclick="VerifyAsync">
+                <button class="btn btn-primary" disabled="@(Busy || _campaignRunning)" @onclick="OpenLoginAsync"><i class="bi bi-box-arrow-in-right"></i> Open Facebook login</button>
+                <button class="btn btn-outline-primary" disabled="@(Busy || _campaignRunning)" @onclick="VerifyAsync">
                     @if (_verifying)
                     {
                         <span><i class="bi bi-arrow-repeat spin"></i> Verifying…</span>
                     }
                     else
                     {
-                        <span><i class="bi bi-shield-check"></i> Verify session</span>
+                        <span><i class="bi bi-shield-check"></i> Verify Facebook session</span>
                     }
                 </button>
-                <button class="btn btn-outline-secondary" disabled="@(Busy || CampaignActive || !Session.IsBrowserOpen)" @onclick="CloseBrowserAsync"><i class="bi bi-x-square"></i> Close browser</button>
+                <button class="btn btn-outline-secondary" disabled="@(Busy || _campaignRunning || !_browserOpen)" @onclick="CloseBrowserAsync"><i class="bi bi-x-square"></i> Close browser</button>
+                <button class="btn btn-outline-danger" disabled="@(Busy || _campaignRunning)" @onclick="DisconnectAsync"><i class="bi bi-plug"></i> Disconnect Facebook</button>
             </div>
         </div>
-        @if (CampaignActive)
+        @if (_campaignRunning)
         {
-            <div class="form-text text-warning mt-2"><i class="bi bi-info-circle"></i> Browser controls are disabled while a campaign is running.</div>
+            <div class="form-text text-warning mt-2"><i class="bi bi-info-circle"></i> Browser controls are disabled while one of your campaigns is running.</div>
         }
     </div>
 
@@ -123,12 +133,6 @@ else
                             }
                         </InputSelect>
                     </div>
-                    <div class="mb-3">
-                        <label class="form-label">Browser profile folder</label>
-                        <InputText class="form-control" @bind-Value="_model.BrowserProfilePath" />
-                        <ValidationMessage For="() => _model.BrowserProfilePath" />
-                        <div class="form-text">Holds the cookies of your Facebook login. Use a dedicated folder; do not point it at your everyday browser profile.</div>
-                    </div>
                     <div class="form-check form-switch mb-1">
                         <InputCheckbox class="form-check-input" id="headless" @bind-Value="_model.Headless" />
                         <label class="form-check-label" for="headless">Run hidden (headless) during campaigns</label>
@@ -174,11 +178,22 @@ else
         _pacingKey++;
     }
 
-    private bool CampaignActive => Tracker.ActiveCampaignId is not null;
+    private bool _campaignRunning;
+    private bool _browserOpen;
 
     protected override async Task OnInitializedAsync() => await LoadAsync();
 
-    private async Task LoadAsync() => await RunAsync(async () => _model = await SettingsService.GetAsync());
+    private async Task LoadAsync() => await RunAsync(async () =>
+    {
+        _model = await SettingsService.GetAsync();
+        await RefreshBrowserStateAsync();
+    });
+
+    private async Task RefreshBrowserStateAsync()
+    {
+        _campaignRunning = await CampaignService.HasRunningCampaignAsync();
+        _browserOpen = await Session.IsBrowserOpenAsync();
+    }
 
     private async Task SaveAsync()
     {
@@ -194,7 +209,8 @@ else
         await RunAsync(async () =>
         {
             await Session.OpenLoginWindowAsync();
-            _sessionMessage = "A browser window has opened. Sign in to Facebook there, then click \"Verify session\".";
+            await RefreshBrowserStateAsync();
+            _sessionMessage = "A Chrome window with your private profile has opened. Sign in to Facebook there, then click \"Verify Facebook session\".";
         });
     }
 
@@ -208,6 +224,7 @@ else
             var refreshed = await SettingsService.GetAsync();
             _model!.SessionLastVerifiedAtUtc = refreshed.SessionLastVerifiedAtUtc;
             _model.SessionLastVerifiedResult = refreshed.SessionLastVerifiedResult;
+            await RefreshBrowserStateAsync();
         });
         _verifying = false;
     }
@@ -217,7 +234,26 @@ else
         await RunAsync(async () =>
         {
             await Session.CloseBrowserAsync();
+            await RefreshBrowserStateAsync();
             _sessionMessage = "Browser closed. It will restart with the current settings when needed.";
+        });
+    }
+
+    private async Task DisconnectAsync()
+    {
+        if (!await JS.InvokeAsync<bool>("confirm",
+                "Disconnect Facebook? Your private browser profile (Facebook login, cookies and browser data) will be deleted. Campaigns cannot run until you log in to Facebook again."))
+        {
+            return;
+        }
+        await RunAsync(async () =>
+        {
+            await Session.DisconnectAsync();
+            var refreshed = await SettingsService.GetAsync();
+            _model!.SessionLastVerifiedAtUtc = refreshed.SessionLastVerifiedAtUtc;
+            _model.SessionLastVerifiedResult = refreshed.SessionLastVerifiedResult;
+            await RefreshBrowserStateAsync();
+            _sessionMessage = "Facebook disconnected. Your browser profile was deleted.";
         });
     }
 }

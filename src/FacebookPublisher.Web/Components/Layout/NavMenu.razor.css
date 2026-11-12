@@ -97,3 +97,42 @@
         display: none;
     }
 }
+
+.user-box {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin: 0.25rem 0.75rem 0;
+    padding: 0.7rem 0.75rem;
+    border-radius: 0.6rem;
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.user-avatar {
+    font-size: 1.5rem;
+    color: #a5b4fc;
+    line-height: 1;
+}
+
+.user-meta {
+    min-width: 0;
+}
+
+.user-name {
+    color: #fff;
+    font-size: 0.85rem;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 130px;
+}
+
+.user-role {
+    font-size: 0.72rem;
+    color: #94a3b8;
+}
+
+.user-box ::deep .btn-outline-light {
+    border-color: rgba(255, 255, 255, 0.25);
+}

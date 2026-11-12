@@ -7,7 +7,8 @@ using Microsoft.Playwright;
 namespace FacebookPublisher.BrowserAutomation;
 
 /// <summary>
-/// Drives Facebook's normal web UI in the user's own logged-in browser profile. It performs the same steps a person
+/// Drives Facebook's normal web UI in one application user's own logged-in browser profile (one instance per user, see
+/// <see cref="PlaywrightFacebookAutomationFactory"/>). It performs the same steps a person
 /// would (open group, open composer, type, attach, click Post) and stops at the first sign that Facebook wants
 /// a human: login wall, checkpoint, or restriction notice. It never joins groups, solves challenges, or masks automation.
 /// </summary>
@@ -23,21 +24,25 @@ public sealed class PlaywrightFacebookAutomation : IFacebookAutomation
     private IPage? _workPage;
 
     public PlaywrightFacebookAutomation(
+        Guid ownerId,
         BrowserSessionManager session,
         IOptions<FacebookAutomationOptions> options,
         ILogger<PlaywrightFacebookAutomation> logger)
     {
+        OwnerId = ownerId;
         _session = session;
         _options = options.Value;
         _inspector = new FacebookPageInspector(_options);
         _logger = logger;
     }
 
-    public bool IsBrowserOpen => _session.IsOpen;
+    public Guid OwnerId { get; }
+
+    public bool IsBrowserOpen => _session.IsOpen(OwnerId);
 
     public async Task<SessionStatus> CheckSessionAsync(CancellationToken cancellationToken)
     {
-        var context = await _session.GetContextAsync(requireVisible: false, cancellationToken);
+        var context = await _session.GetContextAsync(OwnerId, requireVisible: false, cancellationToken);
         var page = await context.NewPageAsync();
         try
         {
@@ -74,7 +79,7 @@ public sealed class PlaywrightFacebookAutomation : IFacebookAutomation
 
     public async Task OpenLoginWindowAsync(CancellationToken cancellationToken)
     {
-        var context = await _session.GetContextAsync(requireVisible: true, cancellationToken);
+        var context = await _session.GetContextAsync(OwnerId, requireVisible: true, cancellationToken);
         try
         {
             var page = await context.NewPageAsync();
@@ -188,7 +193,21 @@ public sealed class PlaywrightFacebookAutomation : IFacebookAutomation
         try
         {
             _workPage = null;
-            await _session.CloseAsync();
+            await _session.CloseAsync(OwnerId);
+        }
+        finally
+        {
+            _workLock.Release();
+        }
+    }
+
+    public async Task ResetSessionAsync()
+    {
+        await _workLock.WaitAsync();
+        try
+        {
+            _workPage = null;
+            await _session.ResetAsync(OwnerId);
         }
         finally
         {
@@ -462,7 +481,7 @@ public sealed class PlaywrightFacebookAutomation : IFacebookAutomation
 
     private async Task<IPage> GetWorkPageAsync(CancellationToken ct)
     {
-        var context = await _session.GetContextAsync(requireVisible: false, ct);
+        var context = await _session.GetContextAsync(OwnerId, requireVisible: false, ct);
         if (_workPage is { IsClosed: false } page && ReferenceEquals(page.Context, context))
         {
             return page;
@@ -547,5 +566,27 @@ public sealed class PlaywrightFacebookAutomation : IFacebookAutomation
             return new AutomationHaltedException(HaltReason.BrowserUnavailable, "The browser window was closed.", ex);
         }
         return ex;
+    }
+}
+
+/// <summary>
+/// One automation instance per application user, each bound to that user's browser profile and with its own work page
+/// and lock, so users never share browser state.
+/// </summary>
+public sealed class PlaywrightFacebookAutomationFactory(
+    BrowserSessionManager session,
+    IOptions<FacebookAutomationOptions> options,
+    ILoggerFactory loggerFactory) : IFacebookAutomationFactory
+{
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, PlaywrightFacebookAutomation> _instances = new();
+
+    public IFacebookAutomation ForUser(Guid ownerId)
+    {
+        if (ownerId == Guid.Empty)
+        {
+            throw new ArgumentException("An application user is required.", nameof(ownerId));
+        }
+        return _instances.GetOrAdd(ownerId, id =>
+            new PlaywrightFacebookAutomation(id, session, options, loggerFactory.CreateLogger<PlaywrightFacebookAutomation>()));
     }
 }

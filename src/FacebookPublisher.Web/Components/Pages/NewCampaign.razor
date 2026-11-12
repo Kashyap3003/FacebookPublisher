@@ -5,7 +5,6 @@
 @inject CampaignService CampaignService
 @inject SettingsService SettingsService
 @inject NavigationManager Nav
-@inject FacebookPublisher.Application.Abstractions.ICampaignExecutionTracker Tracker
 
 <PageTitle>Publishing Campaign · Group Publisher</PageTitle>
 
@@ -24,9 +23,9 @@
 }
 else
 {
-    @if (Tracker.ActiveCampaignId is not null)
+    @if (_myCampaignRunning)
     {
-        <div class="info-banner"><i class="bi bi-info-circle me-1"></i> Another campaign is running. A new campaign will be queued and start when it finishes.</div>
+        <div class="info-banner"><i class="bi bi-info-circle me-1"></i> One of your campaigns is running. A new campaign of yours will start when it finishes (other users' campaigns do not affect yours).</div>
     }
 
     <div class="row g-3">
@@ -208,10 +207,13 @@ else
         }
     }
 
+    private bool _myCampaignRunning;
+
     protected override async Task OnInitializedAsync()
     {
         await RunAsync(async () =>
         {
+            _myCampaignRunning = await CampaignService.HasRunningCampaignAsync();
             _settings = await SettingsService.GetEntityAsync();
             _pacing = _settings.Pacing.Clone();
             _requireApproval = _settings.RequireApprovalByDefault;

@@ -10,10 +10,18 @@ public static partial class FileEndpoints
 {
     public static IEndpointRouteBuilder MapFileEndpoints(this IEndpointRouteBuilder app)
     {
-        // Serves uploaded attachments for previews; range processing lets videos seek.
+        // Serves the signed-in user's own attachments for previews (another user's id answers 404); range processing lets videos seek.
         app.MapGet("/media/{attachmentId:guid}", async (Guid attachmentId, ContentService content, CancellationToken ct) =>
         {
-            var file = await content.GetAttachmentFileAsync(attachmentId, ct);
+            AttachmentFile? file;
+            try
+            {
+                file = await content.GetAttachmentFileAsync(attachmentId, ct);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return Results.Forbid();
+            }
             return file is null
                 ? Results.NotFound()
                 : TypedResults.PhysicalFile(file.FullPath, file.MimeType, enableRangeProcessing: true);
@@ -33,7 +41,11 @@ public static partial class FileEndpoints
             }
             catch (NotFoundException)
             {
-                return Results.NotFound();
+                return Results.NotFound(); // also the answer for another user's campaign
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return Results.Forbid();
             }
 
             var baseName = $"campaign-report-{SafeName(report.CampaignName)}-{DateTime.Now:yyyyMMdd-HHmm}";

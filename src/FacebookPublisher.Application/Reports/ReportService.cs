@@ -108,7 +108,7 @@ public sealed class ReportService(IApplicationDbContextFactory dbFactory)
             })
             .FirstOrDefaultAsync(ct);
 
-        var settings = await db.Settings.AsNoTracking().FirstOrDefaultAsync(s => s.Id == PublisherSettings.SingletonId, ct);
+        var settings = await db.Settings.AsNoTracking().FirstOrDefaultAsync(ct);
 
         var recent = await db.CampaignTargets.AsNoTracking()
             .Where(t => t.Status != TargetStatus.Pending)

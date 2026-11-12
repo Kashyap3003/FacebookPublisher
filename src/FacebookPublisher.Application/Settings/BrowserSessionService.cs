@@ -5,17 +5,23 @@ using Microsoft.Extensions.Logging;
 
 namespace FacebookPublisher.Application.Settings;
 
-/// <summary>User-initiated browser session operations (login window, session verification, browser restart).</summary>
+/// <summary>
+/// The signed-in user's Facebook connection: login window, session verification, browser restart and disconnect.
+/// Always operates on the signed-in user's own browser profile; Facebook credentials never pass through the app.
+/// </summary>
 public sealed class BrowserSessionService(
-    IFacebookAutomation automation,
+    IFacebookAutomationFactory automationFactory,
+    ICurrentUser currentUser,
     ICampaignExecutionTracker tracker,
     SettingsService settings,
     ILogger<BrowserSessionService> logger)
 {
-    public bool IsBrowserOpen => automation.IsBrowserOpen;
+    public async Task<bool> IsBrowserOpenAsync(CancellationToken ct = default) =>
+        (await AutomationAsync(ct)).IsBrowserOpen;
 
     public async Task<SessionStatus> CheckSessionAsync(CancellationToken ct = default)
     {
+        var automation = await AutomationAsync(ct);
         SessionStatus status;
         try
         {
@@ -27,27 +33,42 @@ public sealed class BrowserSessionService(
         }
 
         await settings.RecordSessionCheckAsync(status.IsLoggedIn, status.CheckedAtUtc, ct);
-        logger.LogInformation("Facebook session check: {IsLoggedIn} ({Message})", status.IsLoggedIn, status.Message);
+        logger.LogInformation("Facebook session check for user {OwnerId}: {IsLoggedIn}", automation.OwnerId, status.IsLoggedIn);
         return status;
     }
 
-    public Task OpenLoginWindowAsync(CancellationToken ct = default)
+    public async Task OpenLoginWindowAsync(CancellationToken ct = default)
     {
-        EnsureNoActiveCampaign();
-        return automation.OpenLoginWindowAsync(ct);
+        var automation = await AutomationAsync(ct);
+        EnsureNoActiveCampaign(automation.OwnerId);
+        await automation.OpenLoginWindowAsync(ct);
     }
 
-    public Task CloseBrowserAsync()
+    public async Task CloseBrowserAsync(CancellationToken ct = default)
     {
-        EnsureNoActiveCampaign();
-        return automation.CloseBrowserAsync();
+        var automation = await AutomationAsync(ct);
+        EnsureNoActiveCampaign(automation.OwnerId);
+        await automation.CloseBrowserAsync();
     }
 
-    private void EnsureNoActiveCampaign()
+    /// <summary>Disconnects Facebook for the signed-in user by deleting their browser profile.</summary>
+    public async Task DisconnectAsync(CancellationToken ct = default)
     {
-        if (tracker.ActiveCampaignId is not null)
+        var automation = await AutomationAsync(ct);
+        EnsureNoActiveCampaign(automation.OwnerId);
+        await automation.ResetSessionAsync();
+        await settings.RecordSessionCheckAsync(null, null, ct);
+        logger.LogInformation("Facebook session of user {OwnerId} disconnected (browser profile deleted)", automation.OwnerId);
+    }
+
+    private async Task<IFacebookAutomation> AutomationAsync(CancellationToken ct) =>
+        automationFactory.ForUser(await currentUser.GetUserIdAsync(ct));
+
+    private void EnsureNoActiveCampaign(Guid ownerId)
+    {
+        if (tracker.IsOwnerBusy(ownerId))
         {
-            throw new AppValidationException("A campaign is running. Wait for it to finish or cancel it first.");
+            throw new AppValidationException("One of your campaigns is running and using your browser. Wait for it to finish or stop it first.");
         }
     }
 }

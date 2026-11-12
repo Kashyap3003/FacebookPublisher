@@ -90,6 +90,7 @@ public sealed record BatchProgressDto(
 
 public sealed record CampaignProgressDto(
     Guid Id,
+    Guid OwnerId,
     string Name,
     Guid ContentId,
     string ContentTitle,
@@ -109,6 +110,7 @@ public sealed record CampaignProgressDto(
 {
     public static CampaignProgressDto From(Campaign c) => new(
         c.Id,
+        c.OwnerId,
         c.Name,
         c.ContentPostId,
         c.ContentPost?.Title ?? string.Empty,

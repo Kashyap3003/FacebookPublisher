@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using FacebookPublisher.Application.Abstractions;
 using FacebookPublisher.Application.Automation;
 using FacebookPublisher.Application.Settings;
@@ -9,78 +10,137 @@ using Microsoft.Playwright;
 namespace FacebookPublisher.BrowserAutomation;
 
 /// <summary>
-/// Owns the single persistent browser context. The profile folder keeps the cookies of a session the user logged
-/// into manually, so no credentials ever pass through the application.
+/// Owns one persistent browser context per application user. Each context uses that user's own profile folder (their
+/// Facebook cookies and storage), launched with that user's browser settings. A per-user lock guarantees at most one
+/// browser process per profile; users never share a context, page or profile, and a crash of one user's browser
+/// only affects that user. No credentials ever pass through the application.
 /// </summary>
 public sealed class BrowserSessionManager(
-    IApplicationDbContextFactory dbFactory,
+    ISystemDbContextFactory dbFactory,
+    BrowserProfileStore profiles,
     ILogger<BrowserSessionManager> logger) : IAsyncDisposable
 {
-    private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly ConcurrentDictionary<Guid, UserSession> _sessions = new();
+    private readonly SemaphoreSlim _playwrightGate = new(1, 1);
     private IPlaywright? _playwright;
-    private volatile IBrowserContext? _context;
-    private bool _isHeadless;
 
-    public bool IsOpen => _context is not null;
+    public bool IsOpen(Guid ownerId) => _sessions.TryGetValue(ownerId, out var s) && s.Context is not null;
 
-    public PublisherSettings Settings { get; private set; } = SettingsService.CreateDefaults();
+    /// <summary>The settings the user's browser was last launched with (defaults before the first launch).</summary>
+    public PublisherSettings SettingsFor(Guid ownerId) =>
+        _sessions.TryGetValue(ownerId, out var s) ? s.Settings : SettingsService.CreateDefaults();
 
-    /// <summary>Returns the running context, launching it if needed. <paramref name="requireVisible"/> relaunches a headless browser as headed.</summary>
-    public async Task<IBrowserContext> GetContextAsync(bool requireVisible, CancellationToken ct)
+    public string ProfilePathFor(Guid ownerId) => profiles.GetProfilePath(ownerId);
+
+    /// <summary>
+    /// Returns the user's running context, launching it if needed. <paramref name="requireVisible"/> relaunches a
+    /// headless browser as a visible one (needed for the Facebook login window).
+    /// </summary>
+    public async Task<IBrowserContext> GetContextAsync(Guid ownerId, bool requireVisible, CancellationToken ct)
     {
-        await _gate.WaitAsync(ct);
+        var session = Session(ownerId);
+        await session.Gate.WaitAsync(ct);
         try
         {
-            var context = _context;
-            if (context is not null && !(requireVisible && _isHeadless))
+            var context = session.Context;
+            if (context is not null && !(requireVisible && session.IsHeadless))
             {
                 return context;
             }
-
             if (context is not null)
             {
-                await CloseContextAsync();
+                await CloseContextAsync(session);
             }
 
-            Settings = await LoadSettingsAsync(ct);
-            _isHeadless = Settings.Headless && !requireVisible;
-            _context = await LaunchAsync(Settings, _isHeadless);
-            return _context;
+            session.Settings = await LoadSettingsAsync(ownerId, ct);
+            session.IsHeadless = session.Settings.Headless && !requireVisible;
+            session.Context = await LaunchAsync(session, ct);
+            return session.Context;
         }
         finally
         {
-            _gate.Release();
+            session.Gate.Release();
         }
     }
 
-    public async Task CloseAsync()
+    public async Task CloseAsync(Guid ownerId)
     {
-        await _gate.WaitAsync();
+        if (!_sessions.TryGetValue(ownerId, out var session))
+        {
+            return;
+        }
+        await session.Gate.WaitAsync();
         try
         {
-            await CloseContextAsync();
+            await CloseContextAsync(session);
         }
         finally
         {
-            _gate.Release();
+            session.Gate.Release();
+        }
+    }
+
+    /// <summary>Disconnects Facebook for the user: closes their browser and deletes their profile folder.</summary>
+    public async Task ResetAsync(Guid ownerId)
+    {
+        var session = Session(ownerId);
+        await session.Gate.WaitAsync();
+        try
+        {
+            await CloseContextAsync(session);
+            profiles.Delete(ownerId);
+        }
+        finally
+        {
+            session.Gate.Release();
         }
     }
 
     public async ValueTask DisposeAsync()
     {
-        await CloseAsync();
+        foreach (var ownerId in _sessions.Keys)
+        {
+            await CloseAsync(ownerId);
+        }
         _playwright?.Dispose();
-        _gate.Dispose();
+        _playwrightGate.Dispose();
     }
 
-    private async Task<IBrowserContext> LaunchAsync(PublisherSettings settings, bool headless)
+    private UserSession Session(Guid ownerId)
     {
-        _playwright ??= await Playwright.CreateAsync();
-        Directory.CreateDirectory(settings.BrowserProfilePath);
+        if (ownerId == Guid.Empty)
+        {
+            throw new ArgumentException("An application user is required.", nameof(ownerId));
+        }
+        return _sessions.GetOrAdd(ownerId, id => new UserSession(id));
+    }
+
+    private async Task<IPlaywright> PlaywrightAsync()
+    {
+        if (_playwright is not null)
+        {
+            return _playwright;
+        }
+        await _playwrightGate.WaitAsync();
+        try
+        {
+            return _playwright ??= await Playwright.CreateAsync();
+        }
+        finally
+        {
+            _playwrightGate.Release();
+        }
+    }
+
+    private async Task<IBrowserContext> LaunchAsync(UserSession session, CancellationToken ct)
+    {
+        var playwright = await PlaywrightAsync();
+        var settings = session.Settings;
+        var profilePath = profiles.EnsureCreated(session.OwnerId);
 
         var options = new BrowserTypeLaunchPersistentContextOptions
         {
-            Headless = headless,
+            Headless = session.IsHeadless,
             Channel = string.IsNullOrWhiteSpace(settings.BrowserChannel) ? null : settings.BrowserChannel,
             ViewportSize = ViewportSize.NoViewport,
             Args = ["--start-maximized"]
@@ -89,7 +149,41 @@ public sealed class BrowserSessionManager(
         IBrowserContext context;
         try
         {
-            context = await _playwright.Chromium.LaunchPersistentContextAsync(settings.BrowserProfilePath, options);
+            context = await LaunchWithRecoveryAsync(playwright, session.OwnerId, profilePath, options);
+        }
+        catch (PlaywrightException ex)
+        {
+            logger.LogError(ex, "Browser launch failed for user {OwnerId}", session.OwnerId);
+            throw new AutomationHaltedException(HaltReason.BrowserUnavailable,
+                $"Your browser could not be started ({FirstLine(ex.Message)}). Close any other window using your Group Publisher browser and check the browser setting.", ex);
+        }
+
+        context.SetDefaultNavigationTimeout(settings.NavigationTimeoutSeconds * 1000f);
+        context.SetDefaultTimeout(15_000);
+        context.Close += (_, _) =>
+        {
+            // The user closed the window (or the browser crashed); the next operation relaunches it.
+            if (ReferenceEquals(session.Context, context))
+            {
+                session.Context = null;
+                logger.LogInformation("Browser of user {OwnerId} closed", session.OwnerId);
+            }
+        };
+
+        logger.LogInformation("Browser launched for user {OwnerId} (channel: {Channel}, headless: {Headless})",
+            session.OwnerId, options.Channel ?? "chromium", session.IsHeadless);
+        return context;
+    }
+
+    private async Task<IBrowserContext> LaunchWithRecoveryAsync(
+        IPlaywright playwright,
+        Guid ownerId,
+        string profilePath,
+        BrowserTypeLaunchPersistentContextOptions options)
+    {
+        try
+        {
+            return await playwright.Chromium.LaunchPersistentContextAsync(profilePath, options);
         }
         catch (PlaywrightException ex) when (options.Channel is null && ex.Message.Contains("Executable doesn't exist", StringComparison.OrdinalIgnoreCase))
         {
@@ -98,38 +192,28 @@ public sealed class BrowserSessionManager(
             if (exitCode != 0)
             {
                 throw new AutomationHaltedException(HaltReason.BrowserUnavailable,
-                    "Chromium could not be installed automatically. Run 'pwsh bin/Debug/net10.0/playwright.ps1 install chromium' or choose Microsoft Edge in Settings.", ex);
+                    "Chromium could not be installed automatically. Run 'pwsh bin/Debug/net10.0/playwright.ps1 install chromium' or choose Google Chrome in Settings.", ex);
             }
-            context = await _playwright.Chromium.LaunchPersistentContextAsync(settings.BrowserProfilePath, options);
+            return await playwright.Chromium.LaunchPersistentContextAsync(profilePath, options);
         }
-        catch (PlaywrightException ex)
+        catch (PlaywrightException ex) when (LooksLikeProfileInUse(ex) && profiles.TryClearStaleLocks(ownerId))
         {
-            logger.LogError(ex, "Browser launch failed");
-            throw new AutomationHaltedException(HaltReason.BrowserUnavailable,
-                $"The browser could not be started ({FirstLine(ex.Message)}). Close any other browser window using the profile folder and check the browser setting.", ex);
+            // A previous browser crashed and left its lock files; they were deletable, so nothing is using the profile.
+            logger.LogWarning("Recovered the browser profile of user {OwnerId} from a stale lock", ownerId);
+            return await playwright.Chromium.LaunchPersistentContextAsync(profilePath, options);
         }
-
-        context.SetDefaultNavigationTimeout(settings.NavigationTimeoutSeconds * 1000f);
-        context.SetDefaultTimeout(15_000);
-        context.Close += (_, _) =>
-        {
-            // The user closed the window (or the browser crashed); the next operation relaunches it.
-            if (ReferenceEquals(_context, context))
-            {
-                _context = null;
-                logger.LogInformation("Browser context closed");
-            }
-        };
-
-        logger.LogInformation("Browser launched (channel: {Channel}, headless: {Headless}, profile: {Profile})",
-            options.Channel ?? "chromium", headless, settings.BrowserProfilePath);
-        return context;
     }
 
-    private async Task CloseContextAsync()
+    private static bool LooksLikeProfileInUse(PlaywrightException ex) =>
+        ex.Message.Contains("ProcessSingleton", StringComparison.OrdinalIgnoreCase)
+        || ex.Message.Contains("already in use", StringComparison.OrdinalIgnoreCase)
+        || ex.Message.Contains("user data directory", StringComparison.OrdinalIgnoreCase)
+        || ex.Message.Contains("Target page, context or browser has been closed", StringComparison.OrdinalIgnoreCase);
+
+    private async Task CloseContextAsync(UserSession session)
     {
-        var context = _context;
-        _context = null;
+        var context = session.Context;
+        session.Context = null;
         if (context is null)
         {
             return;
@@ -137,20 +221,46 @@ public sealed class BrowserSessionManager(
         try
         {
             await context.CloseAsync();
-            logger.LogInformation("Browser closed");
+            logger.LogInformation("Browser of user {OwnerId} closed", session.OwnerId);
         }
         catch (PlaywrightException ex)
         {
-            logger.LogDebug(ex, "Browser was already closed");
+            logger.LogDebug(ex, "Browser of user {OwnerId} was already closed", session.OwnerId);
         }
     }
 
-    private async Task<PublisherSettings> LoadSettingsAsync(CancellationToken ct)
+    /// <summary>Loads the user's own settings and performs the one-time move of a pre-multi-user profile.</summary>
+    private async Task<PublisherSettings> LoadSettingsAsync(Guid ownerId, CancellationToken ct)
     {
-        await using var db = await dbFactory.CreateAsync(ct);
-        return await db.Settings.AsNoTracking().FirstOrDefaultAsync(s => s.Id == PublisherSettings.SingletonId, ct)
-            ?? SettingsService.CreateDefaults();
+        await using var db = await dbFactory.CreateForOwnerAsync(ownerId, ct);
+        var settings = await db.Settings.FirstOrDefaultAsync(ct);
+        if (settings is null)
+        {
+            return SettingsService.CreateDefaults();
+        }
+
+        if (!string.IsNullOrWhiteSpace(settings.LegacyBrowserProfilePath))
+        {
+            profiles.TryMoveLegacyProfile(ownerId, settings.LegacyBrowserProfilePath);
+            settings.LegacyBrowserProfilePath = null;
+            await db.SaveChangesAsync(ct);
+        }
+        return settings;
     }
 
     private static string FirstLine(string message) => message.Split('\n')[0].Trim();
+
+    private sealed class UserSession(Guid ownerId)
+    {
+        public Guid OwnerId { get; } = ownerId;
+
+        /// <summary>Serialises launch/close/reset of this user's browser: one browser process per profile.</summary>
+        public SemaphoreSlim Gate { get; } = new(1, 1);
+
+        public volatile IBrowserContext? Context;
+
+        public bool IsHeadless { get; set; }
+
+        public PublisherSettings Settings { get; set; } = SettingsService.CreateDefaults();
+    }
 }

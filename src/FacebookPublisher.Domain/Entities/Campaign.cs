@@ -3,8 +3,14 @@ using FacebookPublisher.Domain.Enums;
 
 namespace FacebookPublisher.Domain.Entities;
 
-public class Campaign : BaseEntity
+public class Campaign : BaseEntity, IOwnedEntity
 {
+    /// <summary>
+    /// Application user who owns the campaign. Execution always uses this user's data and Facebook browser session,
+    /// never the identity of whoever is currently using the UI. Campaign targets inherit ownership from here.
+    /// </summary>
+    public Guid OwnerId { get; set; }
+
     public string Name { get; set; } = string.Empty;
 
     public Guid ContentPostId { get; set; }

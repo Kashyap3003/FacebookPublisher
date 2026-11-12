@@ -125,9 +125,11 @@ else
 @code {
     private DashboardDto? _data;
     private int _refreshQueued;
+    private Guid? _userId;
 
     protected override async Task OnInitializedAsync()
     {
+        _userId = await GetCurrentUserIdAsync();
         // Opening the app is the manual trigger for recovering campaigns interrupted by an application stop.
         await RunAsync(() => CampaignService.ReconcileOrphanedCampaignsAsync());
         await LoadAsync();
@@ -137,9 +139,12 @@ else
 
     private Task LoadAsync() => RunAsync(async () => _data = await Reports.GetDashboardAsync());
 
-    private Task OnTargetChanged(Guid campaignId, TargetProgressDto target, CampaignCountsDto counts) => QueueRefresh();
+    // Only this user's campaigns trigger a refresh; events of other users are ignored.
+    private Task OnTargetChanged(Guid ownerId, Guid campaignId, TargetProgressDto target, CampaignCountsDto counts) =>
+        ownerId == _userId ? QueueRefresh() : Task.CompletedTask;
 
-    private Task OnCampaignChanged(CampaignProgressDto campaign) => QueueRefresh();
+    private Task OnCampaignChanged(CampaignProgressDto campaign) =>
+        campaign.OwnerId == _userId ? QueueRefresh() : Task.CompletedTask;
 
     // Coalesces bursts of events into at most one reload per second.
     private async Task QueueRefresh()

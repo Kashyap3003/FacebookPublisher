@@ -20,7 +20,7 @@ public class CampaignRunnerTests
     private readonly CampaignExecutionTracker _tracker = new();
 
     private CampaignRunner CreateRunner() => new(
-        _db, _automation, new FakeStorage(), _gate, _notifier,
+        _db, new FakeAutomationFactory().Use(TestDbFactory.DefaultOwner, _automation), new FakeUserAccounts(), new FakeStorage(), _gate, _notifier,
         new BatchDelayService(new SystemRandomSource()), new RecordingDelay(), _tracker,
         NullLogger<CampaignRunner>.Instance);
 
@@ -260,18 +260,35 @@ public class CampaignRunnerTests
 
     private static string Slug(string url) => url[(url.LastIndexOf('/') + 1)..];
 
-    internal sealed class TestDbFactory : IApplicationDbContextFactory
+    /// <summary>In-memory database whose contexts are scoped to one owner (like the signed-in user), plus system access.</summary>
+    internal sealed class TestDbFactory : IApplicationDbContextFactory, ISystemDbContextFactory
     {
-        private readonly DbContextOptions<AppDbContext> _options = new DbContextOptionsBuilder<AppDbContext>()
-            .UseInMemoryDatabase(Guid.NewGuid().ToString())
-            .Options;
+        public static readonly Guid DefaultOwner = new("11111111-1111-1111-1111-111111111111");
+
+        private readonly AppDbContextFactory _system;
+
+        public TestDbFactory(Guid? ownerId = null)
+        {
+            var options = new DbContextOptionsBuilder<AppDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;
+            _system = new AppDbContextFactory(new OptionsDbContextFactory(options));
+            OwnerId = ownerId ?? DefaultOwner;
+        }
+
+        public Guid OwnerId { get; }
 
         public Task<IApplicationDbContext> CreateAsync(CancellationToken cancellationToken = default) =>
-            Task.FromResult<IApplicationDbContext>(new AppDbContext(_options));
+            _system.CreateForOwnerAsync(OwnerId, cancellationToken);
+
+        public Task<IApplicationDbContext> CreateForOwnerAsync(Guid ownerId, CancellationToken cancellationToken = default) =>
+            _system.CreateForOwnerAsync(ownerId, cancellationToken);
+
+        public Task<IApplicationDbContext> CreateUnscopedAsync(CancellationToken cancellationToken = default) =>
+            _system.CreateUnscopedAsync(cancellationToken);
     }
 
     internal sealed class FakeAutomation : IFacebookAutomation
     {
+        public Guid OwnerId { get; set; } = TestDbFactory.DefaultOwner;
         public bool LoggedIn { get; set; } = true;
         public Dictionary<string, ResolvedLink?> ShareLinks { get; } = [];
         public List<string> ResolvedRequests { get; } = [];
@@ -291,6 +308,7 @@ public class CampaignRunnerTests
         public List<string> MembershipChecks { get; } = [];
         public List<string> PublishedTo { get; } = [];
         public bool ApprovalRequested { get; private set; }
+        public bool WasReset { get; private set; }
 
         /// <summary>Runs after a (simulated) successful submission — e.g. to press Stop after the 60th post.</summary>
         public Func<string, Task>? AfterPublish { get; set; }
@@ -309,7 +327,10 @@ public class CampaignRunnerTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             progress?.Report("Opening the group page…");
-            MembershipChecks.Add(groupUrl);
+            lock (MembershipChecks)
+            {
+                MembershipChecks.Add(groupUrl);
+            }
             var status = Membership.GetValueOrDefault(Slug(groupUrl), MembershipStatus.Member);
             return Task.FromResult(new MembershipCheckResult(status, $"Group {Slug(groupUrl)}", null));
         }
@@ -345,20 +366,37 @@ public class CampaignRunnerTests
         }
 
         public Task CloseBrowserAsync() => Task.CompletedTask;
+
+        public Task ResetSessionAsync()
+        {
+            WasReset = true;
+            return Task.CompletedTask;
+        }
     }
 
     internal sealed class FakeStorage : IFileStorage
     {
-        public Task<StoredFile> SaveAsync(Stream content, string originalFileName, long maxBytes, CancellationToken cancellationToken) =>
+        /// <summary>Owners whose files were requested (to prove a campaign only uses its owner's storage).</summary>
+        public System.Collections.Concurrent.ConcurrentBag<Guid> RequestedOwners { get; } = [];
+
+        public Task<StoredFile> SaveAsync(Guid ownerId, Stream content, string originalFileName, long maxBytes, CancellationToken cancellationToken) =>
             throw new NotSupportedException();
 
-        public Stream OpenRead(string storedFileName) => Stream.Null;
+        public Stream OpenRead(Guid ownerId, string storedFileName) => Stream.Null;
 
-        public string GetFullPath(string storedFileName) => Path.Combine(Path.GetTempPath(), storedFileName);
+        public string GetFullPath(Guid ownerId, string storedFileName)
+        {
+            RequestedOwners.Add(ownerId);
+            return Path.Combine(Path.GetTempPath(), ownerId.ToString("N"), storedFileName);
+        }
 
-        public bool Exists(string storedFileName) => true;
+        public bool Exists(Guid ownerId, string storedFileName)
+        {
+            RequestedOwners.Add(ownerId);
+            return true;
+        }
 
-        public void Delete(string storedFileName)
+        public void Delete(Guid ownerId, string storedFileName)
         {
         }
     }
@@ -367,12 +405,24 @@ public class CampaignRunnerTests
     {
         public List<CampaignMessage> Messages { get; } = [];
 
-        public Task CampaignChangedAsync(CampaignProgressDto campaign, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        /// <summary>Owner of every event that was sent, in order.</summary>
+        public System.Collections.Concurrent.ConcurrentQueue<(Guid OwnerId, Guid CampaignId)> Events { get; } = new();
 
-        public Task TargetChangedAsync(Guid campaignId, TargetProgressDto target, CampaignCountsDto counts, CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-        public Task MessageAsync(Guid campaignId, CampaignMessage message, CancellationToken cancellationToken = default)
+        public Task CampaignChangedAsync(CampaignProgressDto campaign, CancellationToken cancellationToken = default)
         {
+            Events.Enqueue((campaign.OwnerId, campaign.Id));
+            return Task.CompletedTask;
+        }
+
+        public Task TargetChangedAsync(Guid ownerId, Guid campaignId, TargetProgressDto target, CampaignCountsDto counts, CancellationToken cancellationToken = default)
+        {
+            Events.Enqueue((ownerId, campaignId));
+            return Task.CompletedTask;
+        }
+
+        public Task MessageAsync(Guid ownerId, Guid campaignId, CampaignMessage message, CancellationToken cancellationToken = default)
+        {
+            Events.Enqueue((ownerId, campaignId));
             lock (Messages)
             {
                 Messages.Add(message);

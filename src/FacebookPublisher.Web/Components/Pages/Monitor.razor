@@ -362,6 +362,7 @@ else
     private DateTime? _approvalDeadline;
     private bool _showSteps = true;
     private bool _loading = true;
+    private Guid? _userId;
     private Timer? _ticker;
 
     // Newest first.
@@ -394,6 +395,7 @@ else
 
     protected override async Task OnParametersSetAsync()
     {
+        _userId ??= await GetCurrentUserIdAsync();
         _loading = true;
         await RunAsync(async () =>
         {
@@ -411,8 +413,9 @@ else
         _loading = false;
     }
 
-    private Task OnCampaignChanged(CampaignProgressDto campaign) => InvokeAsync(() =>
+    private Task OnCampaignChanged(CampaignProgressDto campaign) => campaign.OwnerId != _userId ? Task.CompletedTask : InvokeAsync(() =>
     {
+        // Only the signed-in user's own campaigns are ever shown (events of other users are ignored above).
         if (_campaign is null ? Id is null || Id == campaign.Id : _campaign.Id == campaign.Id)
         {
             if (_campaign?.Id != campaign.Id)
@@ -424,7 +427,7 @@ else
         }
     });
 
-    private Task OnTargetChanged(Guid campaignId, TargetProgressDto target, CampaignCountsDto counts) => InvokeAsync(() =>
+    private Task OnTargetChanged(Guid ownerId, Guid campaignId, TargetProgressDto target, CampaignCountsDto counts) => ownerId != _userId ? Task.CompletedTask : InvokeAsync(() =>
     {
         if (_campaign?.Id != campaignId)
         {
@@ -439,7 +442,7 @@ else
         StateHasChanged();
     });
 
-    private Task OnMessage(Guid campaignId, CampaignMessage message) => InvokeAsync(() =>
+    private Task OnMessage(Guid ownerId, Guid campaignId, CampaignMessage message) => ownerId != _userId ? Task.CompletedTask : InvokeAsync(() =>
     {
         if (_campaign?.Id != campaignId)
         {
@@ -525,13 +528,12 @@ else
 
     private async Task DecideAsync(Guid targetId, bool approve)
     {
-        await RunAsync(() =>
+        await RunAsync(async () =>
         {
-            if (!CampaignService.SubmitApproval(targetId, approve))
+            if (!await CampaignService.SubmitApprovalAsync(targetId, approve))
             {
                 ShowError("This post is no longer waiting for review (it may have timed out).");
             }
-            return Task.CompletedTask;
         });
     }
 
